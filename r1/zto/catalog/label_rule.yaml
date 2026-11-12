@@ -1,0 +1,18 @@
+# Congestion definition (label_rule): what r1/dataset/build.py labels, the persistence baseline predicts and
+# the xApp's threshold policy acts on — one definition everywhere. Bounds: zto/spec.schema.json.
+#
+#   congested(τ) = every KPM sample in (τ − min_duration_s, τ] has  <feature> <op> <threshold_pct>
+#   label y(t)   = congested(t + horizon_ms)            (dataset/build.py)
+#   persistence  = congested(t)                          (dataset/evaluate.py --pred persistence;
+#                                                         xApp policy=threshold, min_duration_samples)
+# Why sustained: after idle the gNB DL MCS restarts near 0 and climbs to 28 in ~2 s, so every ON onset opens
+# with a 1–2 s PRB spike (~90 % at 5 Mbps/UE) that is not congestion (NOTES.md, ramp rerun 2026-11-03).
+
+label_rule:
+  feature: cell_prb_util
+  ops: [">="]                  # "<=" is schema-valid but inverts the intent (gate read-back must catch it)
+  threshold_pct: 80
+  min_duration_s: 3            # default; slot, range [1..10] in the schema
+  xapp:
+    min_duration_samples: "ceil(min_duration_s * 1000 / sampling_ms)"
+readback: "congestion = cell PRB utilization {op} {threshold_pct}% sustained for {min_duration_s} s"

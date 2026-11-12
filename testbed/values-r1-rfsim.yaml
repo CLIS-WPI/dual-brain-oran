@@ -1,0 +1,21 @@
+# COMMAG-R1 overrides for helm-charts/oai-rfsim (what the Harmony Operator applied from the canvas;
+# harmony_backend_subset/services/k8s/experiment_ran.py build_spec). Fill the <...> placeholders.
+images:
+  gnb: {registry: localhost/harmony, repository: oai-gnb, tag: "2026.w27-uhd410-e2-aura3"}   # images/gnb (OAI + patches/oai)
+gnb:
+  extraEnv: [{name: OAI_GDBSTACKS, value: "1"}]
+  dlCarrierBandwidth: 51          # 51 PRB, band 78, 30 kHz SCS (gnb.rfsim.band77.51prb.conf)
+ue:
+  instances:                      # start order: RIC -> gNB -> UE1 -> UE2 -> UE3 (each after the previous PDU session)
+    - {name: ue1, imsi: "<IMSI_UE1>", key: "<SIM_K>", opc: "<SIM_OPC>", dnn: oai, sst: 1, sd: 1}   # center UE
+    - {name: ue2, imsi: "<IMSI_UE2>", key: "<SIM_K>", opc: "<SIM_OPC>", dnn: oai, sst: 1, sd: 1}   # center UE
+    - {name: ue3, imsi: "<IMSI_UE3>", key: "<SIM_K>", opc: "<SIM_OPC>", dnn: oai, sst: 1, sd: 1,  # edge (protected) UE
+       channel: {ploss_dB: 30, noise_power_dB: -10}}   # UE-side RFsim AWGN DL model: MCS ~27 -> ~14
+e2Agent: {enabled: true}
+e3Agent: {prbTotal: 51}
+trafficGen:
+  resources: {requests: {cpu: 250m, memory: 128Mi}, limits: {cpu: "2", memory: 1Gi}}  # 256 Mi default was OOM-killed by ~600 iperf flows
+---
+# overrides for helm-charts/oai-ric (separate release)
+image: {registry: localhost/harmony, repository: flexric, tag: "kpm-sd-dualbrain11"}   # images/ric
+ric: {kpm: {nssaiSst: "1", nssaiSd: "000001"}}

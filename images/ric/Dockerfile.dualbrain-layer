@@ -1,0 +1,26 @@
+# HARMONY: add the Dual-Brain congestion xApp to an existing FlexRIC RIC image, and
+# replace nearRT-RIC with the one built from this tree (same source as the base image +
+# the E42 level-triggered fix in src/ric/iApp; the SM plugins and other xApps stay).
+#   docker build --target oai-flexric-builder -t localhost/harmony/flexric-builder:dualbrain \
+#     -f flexric/docker/Dockerfile.flexric.ubuntu flexric
+#   docker build -f flexric/docker/Dockerfile.dualbrain-layer \
+#     --build-arg BASE_RIC_IMAGE=localhost/harmony/flexric:kpm-sd -t localhost/harmony/flexric:kpm-sd-dualbrain flexric
+# (scripts/build-dualbrain.sh does both.)
+ARG BUILDER_IMAGE=localhost/harmony/flexric-builder:dualbrain
+ARG BASE_RIC_IMAGE=localhost/harmony/flexric:kpm-sd
+FROM ${BUILDER_IMAGE} AS builder
+
+FROM ${BASE_RIC_IMAGE}
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends libcjson1 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/onnxruntime/lib /opt/onnxruntime/lib
+COPY --from=builder /flexric/build/examples/xApp/c/dual_brain/xapp_congestion_ctrl /usr/local/flexric/xApp/c/dual_brain/xapp_congestion_ctrl
+COPY --from=builder /flexric/build/examples/ric/nearRT-RIC /usr/local/bin/nearRT-RIC
+COPY --from=builder /flexric/build/examples/xApp/c/dual_brain/cc_model_test /usr/local/flexric/xApp/c/dual_brain/cc_model_test
+COPY --from=builder /flexric/build/examples/xApp/c/dual_brain/cc_replay /usr/local/flexric/xApp/c/dual_brain/cc_replay
+RUN ldd /usr/local/flexric/xApp/c/dual_brain/xapp_congestion_ctrl | grep -q "not found" && exit 1 || true
+RUN ldd /usr/local/bin/nearRT-RIC | grep -q "not found" && exit 1 || true
+# Upstream nearRT-RIC writes every MAC/RLC/PDCP/SLICE/GTP indication to ./log.txt
+# (cwd /) through its built-in stdout listener: 487 GB in 2 days on the lab RIC.
+RUN ln -sf /dev/null /log.txt
+LABEL harmony.dualbrain.xapp="1"

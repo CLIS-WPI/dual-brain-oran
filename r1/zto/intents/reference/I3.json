@@ -1,0 +1,13 @@
+{
+  "_intent_id": "I3",
+  "_intent_text": "Keep latency low for our cell-edge subscriber whenever the cell is about to get congested.",
+  "$defaults": "zto/defaults.json",
+  "_note": "explicit fields only; every other field = zto/defaults.json (resolve.py). Review: Milad.",
+  "label_rule": {
+    "op": ">="
+  },
+  "slice_action": {
+    "action": "reserve_prb_for_protected_ue",
+    "target": "protected_ue"
+  }
+}

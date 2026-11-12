@@ -1,0 +1,444 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index af536b2174..84069aa956 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1197,6 +1197,7 @@ set (MAC_NR_SRC
+   ${NR_GNB_MAC_DIR}/gNB_scheduler.c
+   ${NR_GNB_MAC_DIR}/gNB_scheduler_bch.c
+   ${NR_GNB_MAC_DIR}/gNB_scheduler_dlsch.c
++  ${NR_GNB_MAC_DIR}/aura_quota.c
+   ${NR_GNB_MAC_DIR}/gNB_scheduler_dlsch_default_policies.c
+   ${NR_GNB_MAC_DIR}/gNB_scheduler_ulsch.c
+   ${NR_GNB_MAC_DIR}/gNB_scheduler_ulsch_default_policies.c
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
+index 883b95d47e..ec8f28bdf6 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
+@@ -1,6 +1,7 @@
+ /*
+  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
+  */
++#include "aura_quota.h"
+ 
+ /*!
+  * \brief       procedures related to gNB for the DLSCH transport channel
+@@ -768,15 +769,66 @@ static void nr_dl_schedule(gNB_MAC_INST *mac,
+     params.n_rb_avail[b] = n_rb_sched[b];
+   }
+ 
+-  int i = 0;
+-  while (i < n) {
+-    int beam = candidates[i].alloc_beam_idx;
+-    int start = i;
+-    while (i < n && candidates[i].alloc_beam_idx == beam)
+-      i++;
+-    int count = i - start;
++  /* AURA: file-driven per-slice PRB budgets (no E2). When active, run PF
++   * separately per slice with n_rb_avail capped to that slice's quota so
++   * dual-UE saturated DL can realize ~quota ratios. */
++  aura_quota_maybe_reload();
++  aura_quota_begin_slot(frame, slot);
+ 
+-    mac->dl_rb_alloc(&params, candidates + start, count);
++  if (aura_quota_active()) {
++    uint8_t done[MAX_MOBILES_PER_GNB] = {0};
++    for (int pass = 0; pass < n; pass++) {
++      if (done[pass] || candidates[pass].skipped)
++        continue;
++      int sid = aura_quota_ue_slice(candidates[pass].rnti);
++      int q = (sid >= 0) ? aura_quota_slice_quota(sid) : -1;
++      nr_dl_candidate_t group[MAX_MOBILES_PER_GNB];
++      int idx[MAX_MOBILES_PER_GNB];
++      int ng = 0;
++      for (int k = 0; k < n; k++) {
++        if (done[k] || candidates[k].skipped)
++          continue;
++        if (aura_quota_ue_slice(candidates[k].rnti) == sid) {
++          idx[ng] = k;
++          group[ng] = candidates[k];
++          done[k] = 1;
++          ng++;
++        }
++      }
++      if (ng == 0)
++        continue;
++      for (int b = 0; b < num_beams; b++) {
++        params.n_rb_avail[b] = n_rb_sched[b];
++        if (q > 0 && params.n_rb_avail[b] > q)
++          params.n_rb_avail[b] = q;
++      }
++      mac->dl_rb_alloc(&params, group, ng);
++      for (int g = 0; g < ng; g++)
++        candidates[idx[g]] = group[g];
++    }
++  } else {
++    int i = 0;
++    while (i < n) {
++      int beam = candidates[i].alloc_beam_idx;
++      int start = i;
++      while (i < n && candidates[i].alloc_beam_idx == beam)
++        i++;
++      int count = i - start;
++
++      mac->dl_rb_alloc(&params, candidates + start, count);
++    }
++  }
++
++  /* Belt: hard cap + [AURA-QUOTA] log */
++  for (int qi = 0; qi < n; qi++) {
++    nr_dl_candidate_t *qc = &candidates[qi];
++    if (!qc->scheduled || qc->is_retx)
++      continue;
++    uint16_t asked = qc->sched_pdsch.rbSize;
++    uint16_t got = aura_quota_cap_rb(qc->rnti, asked, frame, slot);
++    qc->sched_pdsch.rbSize = got;
++    if (got == 0)
++      qc->scheduled = false;
+   }
+ 
+   /* Release beam reservations for candidates the policy rejected (failed
+diff --git a/openair2/LAYER2/NR_MAC_gNB/aura_quota.h b/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
+new file mode 100644
+index 0000000000..061308cca9
+--- /dev/null
++++ b/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
+@@ -0,0 +1,37 @@
++/*
++ * AURA Day-0 — file-driven PRB quota for OAI NR MAC (2026.w27).
++ * No E2. Consulted by nr_dlsch_preprocessor after PF RB allocation.
++ */
++#ifndef AURA_QUOTA_H
++#define AURA_QUOTA_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifndef AURA_QUOTA_DEFAULT_PATH
++#define AURA_QUOTA_DEFAULT_PATH "/opt/oai-gnb/etc/aura_quota.json"
++#endif
++
++/** Reload JSON if mtime changed or reload_ms elapsed. Safe to call every slot. */
++void aura_quota_maybe_reload(void);
++
++/** Reset per-slot remaining budgets (call once per DL slot before capping UEs). */
++void aura_quota_begin_slot(uint16_t frame, uint16_t slot);
++
++/**
++ * Cap rbSize for this RNTI to remaining slice quota this slot.
++ * Returns capped size (may be 0). Logs [AURA-QUOTA] every ~100 slots when enabled.
++ * If no file / UE not mapped: returns rbSize unchanged (Phase A baseline).
++ */
++uint16_t aura_quota_cap_rb(uint16_t rnti, uint16_t rbSize, uint16_t frame, uint16_t slot);
++
++/** True if a quota file is loaded and at least one UE mapping exists. */
++bool aura_quota_active(void);
++
++/** Slice id for RNTI, or -1 if unmapped. */
++int aura_quota_ue_slice(uint16_t rnti);
++
++/** PRB quota for slice id, or -1 if unknown. */
++int aura_quota_slice_quota(int slice_id);
++
++#endif /* AURA_QUOTA_H */
+diff --git a/openair2/LAYER2/NR_MAC_gNB/aura_quota.c b/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
+new file mode 100644
+index 0000000000..105922dfdc
+--- /dev/null
++++ b/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
+@@ -0,0 +1,296 @@
++/*
++ * AURA Day-0 — minimal file-driven PRB quota (no E2, no external JSON lib).
++ *
++ * Example /opt/oai-gnb/etc/aura_quota.json:
++ * {
++ *   "reload_ms": 500,
++ *   "cap_C": 51,
++ *   "slices": [ {"id": 0, "quota": 38}, {"id": 2, "quota": 13} ],
++ *   "ues": [ {"rnti": "0x7ce4", "slice": 0}, {"rnti": "0xe341", "slice": 2} ]
++ * }
++ */
++#include "aura_quota.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <ctype.h>
++#include <time.h>
++#include <sys/stat.h>
++
++#define AURA_MAX_SLICES 8
++#define AURA_MAX_UES 16
++
++typedef struct {
++  int id;
++  int quota;
++  int remaining; /* per slot */
++} aura_slice_t;
++
++typedef struct {
++  uint16_t rnti;
++  int slice_id;
++} aura_ue_t;
++
++static struct {
++  int reload_ms;
++  int cap_C;
++  int n_slices;
++  int n_ues;
++  aura_slice_t slices[AURA_MAX_SLICES];
++  aura_ue_t ues[AURA_MAX_UES];
++  time_t file_mtime;
++  struct timespec last_reload;
++  int loaded;
++  uint64_t slot_count;
++} g_aq;
++
++static const char *aq_path(void)
++{
++  const char *e = getenv("AURA_QUOTA_FILE");
++  return (e && e[0]) ? e : AURA_QUOTA_DEFAULT_PATH;
++}
++
++static int aq_slice_idx(int id)
++{
++  for (int i = 0; i < g_aq.n_slices; i++)
++    if (g_aq.slices[i].id == id)
++      return i;
++  return -1;
++}
++
++static int aq_ue_slice(uint16_t rnti)
++{
++  for (int i = 0; i < g_aq.n_ues; i++)
++    if (g_aq.ues[i].rnti == rnti)
++      return g_aq.ues[i].slice_id;
++  return -1;
++}
++
++/* Very small JSON helpers: find "key": number / "0x...." */
++static const char *aq_find_key(const char *buf, const char *key)
++{
++  char pat[64];
++  snprintf(pat, sizeof(pat), "\"%s\"", key);
++  return strstr(buf, pat);
++}
++
++static int aq_parse_int_after(const char *p, const char *key, int *out)
++{
++  p = aq_find_key(p, key);
++  if (!p)
++    return -1;
++  p = strchr(p + strlen(key) + 2, ':');
++  if (!p)
++    return -1;
++  p++;
++  while (*p && isspace((unsigned char)*p))
++    p++;
++  char *end = NULL;
++  long v = strtol(p, &end, 0);
++  if (end == p)
++    return -1;
++  *out = (int)v;
++  return 0;
++}
++
++static int aq_parse_rnti(const char *p, uint16_t *rnti)
++{
++  p = aq_find_key(p, "rnti");
++  if (!p)
++    return -1;
++  p = strchr(p, ':');
++  if (!p)
++    return -1;
++  p++;
++  while (*p && isspace((unsigned char)*p))
++    p++;
++  if (*p == '"')
++    p++;
++  char *end = NULL;
++  unsigned long v = strtoul(p, &end, 0);
++  if (end == p)
++    return -1;
++  *rnti = (uint16_t)v;
++  return 0;
++}
++
++static int aq_load_file(const char *path)
++{
++  FILE *f = fopen(path, "r");
++  if (!f)
++    return -1;
++  if (fseek(f, 0, SEEK_END) != 0) {
++    fclose(f);
++    return -1;
++  }
++  long sz = ftell(f);
++  if (sz <= 0 || sz > 1 << 20) {
++    fclose(f);
++    return -1;
++  }
++  rewind(f);
++  char *buf = calloc(1, (size_t)sz + 1);
++  if (!buf) {
++    fclose(f);
++    return -1;
++  }
++  if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
++    free(buf);
++    fclose(f);
++    return -1;
++  }
++  fclose(f);
++
++  memset(&g_aq, 0, sizeof(g_aq));
++  g_aq.reload_ms = 500;
++  g_aq.cap_C = 51;
++  aq_parse_int_after(buf, "reload_ms", &g_aq.reload_ms);
++  aq_parse_int_after(buf, "cap_C", &g_aq.cap_C);
++
++  /* slices: walk each {"id": */
++  const char *p = buf;
++  while (g_aq.n_slices < AURA_MAX_SLICES && (p = strstr(p, "\"id\"")) != NULL) {
++    int id = 0, quota = 0;
++    if (aq_parse_int_after(p, "id", &id) == 0 && aq_parse_int_after(p, "quota", &quota) == 0) {
++      /* Prefer objects under "slices" — skip UE "slice" keys by requiring quota nearby */
++      const char *qpos = aq_find_key(p, "quota");
++      if (qpos && (qpos - p) < 80) {
++        g_aq.slices[g_aq.n_slices].id = id;
++        g_aq.slices[g_aq.n_slices].quota = quota;
++        g_aq.n_slices++;
++      }
++    }
++    p += 4;
++  }
++
++  /* ues */
++  p = buf;
++  while (g_aq.n_ues < AURA_MAX_UES && (p = strstr(p, "\"rnti\"")) != NULL) {
++    uint16_t rnti = 0;
++    int slice = 0;
++    if (aq_parse_rnti(p, &rnti) == 0 && aq_parse_int_after(p, "slice", &slice) == 0) {
++      g_aq.ues[g_aq.n_ues].rnti = rnti;
++      g_aq.ues[g_aq.n_ues].slice_id = slice;
++      g_aq.n_ues++;
++    }
++    p += 6;
++  }
++
++  free(buf);
++
++  /* Clamp sum quotas to cap_C (admission in file; belt-and-suspenders) */
++  int sum = 0;
++  for (int i = 0; i < g_aq.n_slices; i++)
++    sum += g_aq.slices[i].quota;
++  if (sum > g_aq.cap_C && sum > 0) {
++    for (int i = 0; i < g_aq.n_slices; i++)
++      g_aq.slices[i].quota = (g_aq.slices[i].quota * g_aq.cap_C) / sum;
++  }
++
++  g_aq.loaded = (g_aq.n_slices > 0 && g_aq.n_ues > 0);
++  fprintf(stderr,
++          "[AURA-QUOTA] loaded %s slices=%d ues=%d cap_C=%d active=%d\n",
++          path,
++          g_aq.n_slices,
++          g_aq.n_ues,
++          g_aq.cap_C,
++          g_aq.loaded);
++  for (int i = 0; i < g_aq.n_slices; i++)
++    fprintf(stderr, "[AURA-QUOTA]  slice id=%d quota=%d\n", g_aq.slices[i].id, g_aq.slices[i].quota);
++  for (int i = 0; i < g_aq.n_ues; i++)
++    fprintf(stderr, "[AURA-QUOTA]  ue rnti=0x%04x -> slice %d\n", g_aq.ues[i].rnti, g_aq.ues[i].slice_id);
++  return g_aq.loaded ? 0 : -1;
++}
++
++void aura_quota_maybe_reload(void)
++{
++  const char *path = aq_path();
++  struct stat st;
++  if (stat(path, &st) != 0) {
++    if (g_aq.loaded) {
++      fprintf(stderr, "[AURA-QUOTA] file gone, disabling (%s)\n", path);
++      g_aq.loaded = 0;
++      g_aq.n_ues = 0;
++      g_aq.n_slices = 0;
++    }
++    return;
++  }
++
++  struct timespec now;
++  clock_gettime(CLOCK_MONOTONIC, &now);
++  long elapsed_ms = (now.tv_sec - g_aq.last_reload.tv_sec) * 1000L
++                    + (now.tv_nsec - g_aq.last_reload.tv_nsec) / 1000000L;
++  int due = (!g_aq.loaded) || (st.st_mtime != g_aq.file_mtime)
++            || (g_aq.reload_ms > 0 && elapsed_ms >= g_aq.reload_ms);
++  if (!due)
++    return;
++
++  if (aq_load_file(path) == 0) {
++    g_aq.file_mtime = st.st_mtime;
++    g_aq.last_reload = now;
++  }
++}
++
++void aura_quota_begin_slot(uint16_t frame, uint16_t slot)
++{
++  (void)frame;
++  (void)slot;
++  for (int i = 0; i < g_aq.n_slices; i++)
++    g_aq.slices[i].remaining = g_aq.slices[i].quota;
++  g_aq.slot_count++;
++}
++
++bool aura_quota_active(void)
++{
++  return g_aq.loaded != 0;
++}
++
++int aura_quota_ue_slice(uint16_t rnti)
++{
++  return aq_ue_slice(rnti);
++}
++
++int aura_quota_slice_quota(int slice_id)
++{
++  int si = aq_slice_idx(slice_id);
++  if (si < 0)
++    return -1;
++  return g_aq.slices[si].quota;
++}
++
++uint16_t aura_quota_cap_rb(uint16_t rnti, uint16_t rbSize, uint16_t frame, uint16_t slot)
++{
++  if (!g_aq.loaded || rbSize == 0)
++    return rbSize;
++
++  int sid = aq_ue_slice(rnti);
++  if (sid < 0)
++    return rbSize; /* unmapped UE: no cap (Phase A) */
++
++  int si = aq_slice_idx(sid);
++  if (si < 0)
++    return rbSize;
++
++  uint16_t capped = rbSize;
++  if (g_aq.slices[si].remaining <= 0)
++    capped = 0;
++  else if (rbSize > (uint16_t)g_aq.slices[si].remaining)
++    capped = (uint16_t)g_aq.slices[si].remaining;
++
++  g_aq.slices[si].remaining -= capped;
++
++  if ((g_aq.slot_count % 100) == 0) {
++    fprintf(stderr,
++            "[AURA-QUOTA] slot=%u.%u rnti=0x%04x slice=%d quota=%d rb_alloc=%u (asked=%u rem=%d)\n",
++            frame,
++            slot,
++            rnti,
++            sid,
++            g_aq.slices[si].quota,
++            (unsigned)capped,
++            (unsigned)rbSize,
++            g_aq.slices[si].remaining);
++  }
++  return capped;
++}

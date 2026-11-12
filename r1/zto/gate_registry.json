@@ -1,0 +1,11 @@
+{
+  "_note": "Static conflict registry for the verification gate (check 3). Each xApp lists the RAN resources its control touches; a candidate xApp overlapping a *deployed* one on any resource → HOLD naming it. The two fakes are seeded so the check has something to catch: the energy saver touches the DL PRB pool (deployed=false here; gate_inject.py's prb_pool_conflict variant deploys it), the handover xApp does not.",
+  "candidate": {"name": "congestion_xapp (Dual-Brain R1)", "sm": "SLICE (145)", "action": "reserve_prb_for_protected_ue",
+                "resources": ["dl_prb_pool"], "target": "all UEs except the protected UE"},
+  "xapps": [
+    {"name": "energy_saver_xapp (fake)", "sm": "SLICE (145)", "action": "shrink_active_prbs", "resources": ["dl_prb_pool"],
+     "target": "cell", "deployed": false},
+    {"name": "handover_xapp (fake)", "sm": "RC (3)", "action": "handover_control", "resources": ["ue_serving_cell"],
+     "target": "per UE", "deployed": true}
+  ]
+}

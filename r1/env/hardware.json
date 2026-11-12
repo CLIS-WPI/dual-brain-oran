@@ -1,0 +1,86 @@
+{
+ "hostname": "<redacted>",
+ "kernel": "6.8.0-138-generic",
+ "os": "Ubuntu 22.04.5 LTS",
+ "cpu_model": "AMD EPYC 9354 32-Core Processor",
+ "cpu_logical_cores": 64,
+ "cpu_sockets": "2",
+ "ram_gib": 377.6,
+ "gpus": [
+  {
+   "index": "0",
+   "name": "NVIDIA H100 NVL",
+   "memory_total_mib": "95830",
+   "driver": "580.126.09"
+  },
+  {
+   "index": "1",
+   "name": "NVIDIA H100 NVL",
+   "memory_total_mib": "95830",
+   "driver": "580.126.09"
+  }
+ ],
+ "cuda_version": "CUDA Version: 13.0",
+ "docker": "Docker version 29.4.0, build 9d7ad9f",
+ "kubernetes": "{\n  \"clientVersion\": {\n    \"major\": \"1\",\n    \"minor\": \"36\",\n    \"gitVersion\": \"v1.36.2\",\n    \"gitCommit\": \"24e2b02af5543d7910c2bb074c7264df5a8f0467\",\n    \"gitTreeState\": \"clean\",\n    \"buildDate\": \"2026-06-11T18:12:06Z\",\n    \"goVersion\": \"go1.26.4\",\n    \"compiler\": \"gc\",\n    \"platform\": \"linux/amd64\"\n  },\n  \"kustomizeVersion\": \"v5.8.1\"\n}",
+ "minikube_cpuset": {
+  "changed": "2026-11-05T14:41-0500",
+  "by": "docker update --cpuset-cpus 32-63 --cpuset-mems 1 minikube (Milad OK)",
+  "before": {
+   "cpuset_cpus": "",
+   "cpuset_mems": "",
+   "effective_cpus": "0-63",
+   "effective_mems": "0-1"
+  },
+  "after": {
+   "cpuset_cpus": "32-63",
+   "cpuset_mems": "1",
+   "effective_cpus": "32-63",
+   "effective_mems": "1"
+  },
+  "numa": {
+   "node0_cpus": "0-31",
+   "node1_cpus": "32-63",
+   "gpu0_pci_43_node": 0,
+   "gpu1_pci_44_node": 0
+  },
+  "why_node1": "both GPUs (another user GPU0, Ollama GPU1) are on node 0; another user had one process (java, all CPUs) at the time",
+  "probe_before": {
+   "mean_loaded_speed": [
+    1.4626,
+    1.462,
+    1.4367,
+    1.4579
+   ],
+   "when": "2026-11-05 12:36-13:31"
+  },
+  "probe_after": {
+   "mean_loaded_speed": 1.7183,
+   "when": "2026-11-05 14:42",
+   "loadavg_1m": 6.4
+  },
+  "revert": "docker update --cpuset-cpus 0-63 --cpuset-mems 0-1 minikube"
+ },
+ "ollama_cpuset": {
+  "changed": "2026-11-06T12:16/12:37-0500",
+  "by": "docker update --cpuset-cpus 0-31 --cpuset-mems 0 ollama (Milad), then docker restart ollama (Milad OK)",
+  "before": {
+   "cpuset_cpus": "",
+   "cpuset_mems": ""
+  },
+  "after": {
+   "cpuset_cpus": "0-31",
+   "cpuset_mems": "0"
+  },
+  "why": "node-1 watcher flagged Ollama llama-server at 330 % on CPU 46 during model load (2026-11-05 20:26); GPU1 is on node 0",
+  "note": "docker update on the running container dropped its GPU access (nvidia-smi: Failed to initialize NVML) until docker restart",
+  "verified_after_restart": {
+   "gpu_visible": "only GPU1 (GPU-509d8ab3-0c8e-8b98-fbf8-0c55f6ba9058)",
+   "version": "0.40.13",
+   "digests_match": true,
+   "env_unchanged": true,
+   "pair_full_gpu_think_false": true
+  },
+  "revert": "docker update --cpuset-cpus 0-63 --cpuset-mems 0-1 ollama && docker restart ollama"
+ }
+}

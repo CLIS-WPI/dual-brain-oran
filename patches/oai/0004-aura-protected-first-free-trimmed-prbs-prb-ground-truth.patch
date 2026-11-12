@@ -1,0 +1,138 @@
+diff --git a/openair2/LAYER2/NR_MAC_gNB/aura_quota.c b/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
+index 5312a5af1a..13efffa9dc 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
++++ b/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
+@@ -411,6 +411,67 @@ void aura_quota_maybe_reload(void)
+   }
+ }
+ 
++/* HARMONY: per-second PRB ground truth for every UE (capped or not), independent of
++ * the KPM counters: tx_rb = PRBs actually transmitted (sum of rbSize at MAC PDU
++ * generation), budget = sum of DL BWP PRBs over DL slots (KPM's denominator). */
++static struct {
++  uint16_t rnti;
++  uint64_t tx;
++  uint32_t tbs;
++} g_all[AURA_MAX_UES];
++static int g_all_n;
++static uint64_t g_all_budget;
++
++static void aq_all_flush(void);
++
++void aura_quota_note_dl_slot(int bw)
++{
++  static struct timespec last;
++  struct timespec now;
++  clock_gettime(CLOCK_MONOTONIC, &now);
++  if (now.tv_sec != last.tv_sec) {
++    if (last.tv_sec != 0)
++      aq_all_flush(); /* same interval for tx_rb and budget */
++    last = now;
++  }
++  if (bw > 0)
++    g_all_budget += (uint64_t)bw;
++}
++
++static void aq_all_note(uint16_t rnti, uint16_t rbSize)
++{
++  int i = 0;
++  while (i < g_all_n && g_all[i].rnti != rnti)
++    i++;
++  if (i == g_all_n) {
++    if (g_all_n >= AURA_MAX_UES)
++      return;
++    g_all[g_all_n].rnti = rnti;
++    g_all[g_all_n].tx = 0;
++    g_all[g_all_n].tbs = 0;
++    g_all_n++;
++  }
++  g_all[i].tx += rbSize;
++  g_all[i].tbs++;
++}
++
++static void aq_all_flush(void)
++{
++  uint64_t any = 0;
++  for (int i = 0; i < g_all_n; i++)
++    any |= g_all[i].tx;
++  if (any) {
++    char line[512];
++    int o = snprintf(line, sizeof(line), "[AURA-PRB] 1s budget=%llu", (unsigned long long)g_all_budget);
++    for (int i = 0; i < g_all_n && o < (int)sizeof(line) - 64; i++)
++      o += snprintf(line + o, sizeof(line) - o, " rnti=0x%04x:slice=%d:tx_rb=%llu:tbs=%u", g_all[i].rnti,
++                    aq_ue_slice(g_all[i].rnti), (unsigned long long)g_all[i].tx, g_all[i].tbs);
++    fprintf(stderr, "%s\n", line);
++  }
++  g_all_n = 0; /* forget UEs that left; re-learned on their next TB */
++  g_all_budget = 0;
++}
++
+ void aura_quota_begin_slot(uint16_t frame, uint16_t slot)
+ {
+   (void)frame;
+@@ -434,6 +495,7 @@ void aura_quota_begin_slot(uint16_t frame, uint16_t slot)
+ 
+ void aura_quota_note_tx(uint16_t rnti, uint16_t rbSize)
+ {
++  aq_all_note(rnti, rbSize);
+   for (int i = 0; i < g_aq.n_ues; i++)
+     if (g_aq.ues[i].rnti == rnti)
+       g_aq.ues[i].tx += rbSize;
+diff --git a/openair2/LAYER2/NR_MAC_gNB/aura_quota.h b/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
+index 8e054e1fff..2a85efba9c 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
++++ b/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
+@@ -55,4 +55,7 @@ void aura_quota_e2_assoc(uint32_t ue_ref, int slice_id);
+  * printed while a quota is active. */
+ void aura_quota_note_tx(uint16_t rnti, uint16_t rbSize);
+ 
++/** HARMONY: count one DL slot of `bw` PRBs (the KPM RRU.PrbTotDl denominator). */
++void aura_quota_note_dl_slot(int bw);
++
+ #endif /* AURA_QUOTA_H */
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
+index f7ac66755e..211bfb4e15 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
+@@ -777,10 +777,22 @@ static void nr_dl_schedule(gNB_MAC_INST *mac,
+ 
+   if (aura_quota_active()) {
+     uint8_t done[MAX_MOBILES_PER_GNB] = {0};
++    static bool order_logged = false;
++    if (!order_logged) {
++      order_logged = true;
++      LOG_I(NR_MAC, "[AURA-QUOTA] HARMONY: protected (unsliced) UEs allocated first; trimmed PRBs freed\n");
++    }
++    /* HARMONY: unsliced (protected) UEs are allocated first, sliced (capped) groups
++     * after them. In candidate order a capped group allocated first took the whole
++     * band in vrb_map and the protected UE only fit where it left room, so the
++     * reserved floor depended on which UE came first in the list. */
++    for (int sweep = 0; sweep < 2; sweep++)
+     for (int pass = 0; pass < n; pass++) {
+       if (done[pass] || candidates[pass].skipped)
+         continue;
+       int sid = aura_quota_ue_slice(candidates[pass].rnti);
++      if ((sweep == 0) != (sid < 0))
++        continue;
+       int q = (sid >= 0) ? aura_quota_slice_quota(sid) : -1;
+       nr_dl_candidate_t group[MAX_MOBILES_PER_GNB];
+       int idx[MAX_MOBILES_PER_GNB];
+@@ -827,6 +839,10 @@ static void nr_dl_schedule(gNB_MAC_INST *mac,
+     uint16_t asked = qc->sched_pdsch.rbSize;
+     uint16_t got = aura_quota_cap_rb(qc->rnti, asked, frame, slot);
+     qc->sched_pdsch.rbSize = got;
++    /* HARMONY: give the trimmed PRBs back in vrb_map (commit_alloc marked `asked`). */
++    uint16_t *qvrb = params.vrb_map[qc->alloc_beam_idx];
++    for (int rb = got; rb < asked; rb++)
++      qvrb[qc->sched_pdsch.rbStart + rb + qc->bwp_start] &= ~qc->alloc_slbitmap;
+     if (got == 0)
+       qc->scheduled = false;
+   }
+@@ -1460,6 +1476,7 @@ void nr_schedule_ue_spec(module_id_t module_id,
+   NR_ServingCellConfigCommon_t *scc = gNB_mac->common_channels[CC_id].ServingCellConfigCommon;
+   int bw = scc->downlinkConfigCommon->frequencyInfoDL->scs_SpecificCarrierList.list.array[0]->carrierBandwidth;
+   gNB_mac->mac_stats.dl.total_prb_aggregate += bw;
++  aura_quota_note_dl_slot(bw); /* HARMONY: cell PRB budget for the 1s ground-truth log */
+ 
+   nfapi_nr_dl_tti_request_body_t *dl_req = &DL_req->dl_tti_request_body;
+   post_process_pdsch_t pdsch = { frame, slot, dl_req, TX_req };

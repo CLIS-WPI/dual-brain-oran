@@ -1,0 +1,143 @@
+# Per-experiment RAN (set by the Operator from an OaiExperiment); empty = legacy names.
+experiment:
+  slug: ""
+
+tenant:
+  name: tenant-a
+
+# Empty => "<tenant>-core-amf" (same convention as oai-ran chart)
+amfHost: ""
+
+images:
+  # RFsim gNB: 2026.w27-uhd410-e2 is official --build-e2 (E2AP_V3 / KPM_V3_00).
+  # USRP / trafficGen stay on 2026.w27-uhd410 (no E2 overlay).
+  gnb:
+    registry: localhost/harmony
+    repository: oai-gnb
+    tag: "2026.w27-uhd410-e2"
+  ue:
+    registry: docker.io/oaisoftwarealliance
+    repository: oai-nr-ue
+    tag: "2026.w27"
+  trafficGen:
+    # Reuses the gNB image purely as a generic Ubuntu+iperf(2) box — these
+    # OAI images ship legacy `iperf`, not `iperf3`; avoids a 3rd image pull
+    # and a version mismatch between client (UE) and server.
+    registry: localhost/harmony
+    repository: oai-gnb
+    tag: "2026.w27-uhd410"
+
+gnb:
+  # Extra env for the gnb container, e.g. [{name: OAI_GDBSTACKS, value: "1"}] (gdb backtraces of
+  # every thread on an OAI AssertFatal; no effect otherwise). Empty = none.
+  extraEnv: []
+  gnbId: "0xe00"
+  gnbName: "gNB-RFSIM"
+  trackingAreaCode: 40960
+  nrCellId: "12345678L"
+  physCellId: 0
+  sst: 1
+  sd: 1
+  band: 78
+  # From testbed-manager/extera/.../conf_files/gnb.sa.band78.51prb.usrpb200.conf
+  # (a CI-tested OAI reference config) — band78, 51 PRB @ 30kHz SCS.
+  dlAbsoluteFrequencyPointA: 639996
+  absoluteFrequencySSB: 640704
+  # NOTE: intentionally NOT the precise ARFCN->Hz conversion of absoluteFrequencySSB.
+  # The gNB's own startup log prints its recommended UE launch frequency
+  # ("[PHY] Command line parameters for OAI UE: -C <this value>"), derived
+  # from its internal RU frequency setup — that is the value that must be
+  # used for the RFSIM UE to align, not the raw ARFCN formula result.
+  # Must match gNB PHY recommendation: "[PHY] Command line parameters for OAI UE:
+  # -C <Hz> -r <PRB> --numerology 1 --ssb <offset>"
+  ueCenterFrequencyHz: "3609120000"
+  ueSsbOffset: 234
+  dlCarrierBandwidth: 51
+  initialDLBWPlocationAndBandwidth: 13750
+  initialDLBWPcontrolResourceSetZero: 12
+  podIpPrefix: 32
+  # tenant-quota ResourceQuota requires limits.cpu on every pod, so we can't
+  # drop the limit entirely — kept generous (8 cores on a 64-core node) so
+  # CFS quota throttling doesn't disrupt nr-softmodem's real-time loop.
+  resources:
+    requests:
+      cpu: "4"
+      memory: 1Gi
+    limits:
+      cpu: "8"
+      memory: 4Gi
+
+plmn:
+  # Must match Core AMF primary PLMN (208-95) and Harmony subscriber checks.
+  mcc: "208"
+  mnc: "95"
+  mncLength: 2
+
+ue:
+  # One entry per virtual UE pod (NOT replicas=N — each IMSI needs its own
+  # ConfigMap/uicc.conf). Canvas Virtual UE `count` (1–8) drives Helm upgrades
+  # via POST /ue/virtual/fleet/ensure and batch start.
+  # IMSI/key/OPC must exist in the Core's subscriber DB (UDM/UDR) or
+  # registration (NAS Attach) will fail.
+  instances:
+    - name: ue1
+      imsi: "<IMSI>"
+      # OAI lab/rfsim defaults (same as ci-scripts 5g_rfsimulator users row)
+      key: "<SIM_K>"
+      opc: "<SIM_OPC>"
+      dnn: "oai"
+      sst: 1
+      sd: 1
+      # Optional DL channel for this UE (rfsimu_channel_enB0, applied by the UE itself;
+      # no gNB-side per-UE models: OAI maps those by connect order, which is not stable):
+      # channel: {ploss_dB: 20, noise_power_dB: -10}
+  resources:
+    requests:
+      cpu: "1"
+      memory: 512Mi
+    limits:
+      cpu: "4"
+      memory: 2Gi
+
+# Near-RT RIC (FlexRIC) E2 agent on the RFSIM gNB.
+# Points at the co-tenant oai-ric Service (<tenant>-ric) by default.
+e2Agent:
+  enabled: true
+  # Empty => "<tenant>-ric" (ClusterIP Service DNS in the same namespace)
+  ricHost: ""
+  smDir: "/usr/local/lib/flexric/"
+
+# Harmony E3 Agent + dApp runtime sidecars (O-RAN nGRG-aligned, wineslab-independent).
+# Shared emptyDir /e3 hosts the Unix socket. See docs/E3-CONTRACT.md.
+e3Agent:
+  enabled: true
+  image:
+    registry: localhost/harmony
+    repository: e3-agent
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  prbTotal: 51
+  tickMs: 50
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+
+dappRuntime:
+  enabled: true
+  image:
+    registry: localhost/harmony
+    repository: dapp-runtime
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+
+trafficGen:
+  enabled: true
+  port: 5201
+  # iperf2 server (TCP + UDP). Per-experiment override from the portal (e.g. COMMAG-R1: 2 CPU / 1 Gi —
+  # reverse-UDP sessions accumulate over ~600 flows per 20-min run and OOM-killed the 256 Mi default).
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}

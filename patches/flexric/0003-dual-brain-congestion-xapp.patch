@@ -1,0 +1,1819 @@
+diff --git a/docker/Dockerfile.dualbrain-layer b/docker/Dockerfile.dualbrain-layer
+new file mode 100644
+index 0000000..7d830ab
+--- /dev/null
++++ b/docker/Dockerfile.dualbrain-layer
+@@ -0,0 +1,26 @@
++# HARMONY: add the Dual-Brain congestion xApp to an existing FlexRIC RIC image, and
++# replace nearRT-RIC with the one built from this tree (same source as the base image +
++# the E42 level-triggered fix in src/ric/iApp; the SM plugins and other xApps stay).
++#   docker build --target oai-flexric-builder -t localhost/harmony/flexric-builder:dualbrain \
++#     -f flexric/docker/Dockerfile.flexric.ubuntu flexric
++#   docker build -f flexric/docker/Dockerfile.dualbrain-layer \
++#     --build-arg BASE_RIC_IMAGE=localhost/harmony/flexric:kpm-sd -t localhost/harmony/flexric:kpm-sd-dualbrain flexric
++# (scripts/build-dualbrain.sh does both.)
++ARG BUILDER_IMAGE=localhost/harmony/flexric-builder:dualbrain
++ARG BASE_RIC_IMAGE=localhost/harmony/flexric:kpm-sd
++FROM ${BUILDER_IMAGE} AS builder
++
++FROM ${BASE_RIC_IMAGE}
++RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends libcjson1 \
++ && rm -rf /var/lib/apt/lists/*
++COPY --from=builder /opt/onnxruntime/lib /opt/onnxruntime/lib
++COPY --from=builder /flexric/build/examples/xApp/c/dual_brain/xapp_congestion_ctrl /usr/local/flexric/xApp/c/dual_brain/xapp_congestion_ctrl
++COPY --from=builder /flexric/build/examples/ric/nearRT-RIC /usr/local/bin/nearRT-RIC
++COPY --from=builder /flexric/build/examples/xApp/c/dual_brain/cc_model_test /usr/local/flexric/xApp/c/dual_brain/cc_model_test
++COPY --from=builder /flexric/build/examples/xApp/c/dual_brain/cc_replay /usr/local/flexric/xApp/c/dual_brain/cc_replay
++RUN ldd /usr/local/flexric/xApp/c/dual_brain/xapp_congestion_ctrl | grep -q "not found" && exit 1 || true
++RUN ldd /usr/local/bin/nearRT-RIC | grep -q "not found" && exit 1 || true
++# Upstream nearRT-RIC writes every MAC/RLC/PDCP/SLICE/GTP indication to ./log.txt
++# (cwd /) through its built-in stdout listener: 487 GB in 2 days on the lab RIC.
++RUN ln -sf /dev/null /log.txt
++LABEL harmony.dualbrain.xapp="1"
+diff --git a/docker/Dockerfile.flexric.ubuntu b/docker/Dockerfile.flexric.ubuntu
+index 5a6b120..0517064 100644
+--- a/docker/Dockerfile.flexric.ubuntu
++++ b/docker/Dockerfile.flexric.ubuntu
+@@ -57,9 +57,17 @@ RUN apt-get update && \
+        gcc-12 \
+        g++-12 \
+        mold \
++       libcjson-dev \
+        ninja-build && \
+     apt-get clean
+ 
++# HARMONY: ONNX Runtime C API for the Dual-Brain congestion xApp (examples/xApp/c/dual_brain).
++ARG ONNXRUNTIME_VERSION=1.30.0
++RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz \
++ && mkdir -p /opt/onnxruntime \
++ && tar -xzf onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz -C /opt/onnxruntime --strip-components=1 \
++ && rm onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz
++
+ RUN git clone https://github.com/swig/swig.git && \
+     cd swig && \
+     git checkout release-4.1 && \
+@@ -94,7 +102,8 @@ RUN mkdir build && \
+           -DE2AP_VERSION=$E2AP_VERSION \
+           -DKPM_VERSION=$KPM_VERSION \
+           -DCMAKE_C_COMPILER=gcc-12 \
+-          -DCMAKE_CXX_COMPILER=g++-12 .. && \
++          -DCMAKE_CXX_COMPILER=g++-12 \
++          -DONNXRUNTIME_ROOT=/opt/onnxruntime .. && \
+     ninja && \
+     ninja install && \
+     echo "--- Check shared objects dependencies for executable nearRT-RIC ---" && \
+@@ -118,6 +127,7 @@ RUN apt-get update && \
+        gpg \
+        wget \
+        libsctp1 \
++       libcjson1 \
+        python3 \
+        python3-pip && \
+     apt-get autoremove -y && \
+@@ -139,6 +149,9 @@ COPY --from=oai-flexric-builder \
+ COPY --from=oai-flexric-builder \
+     /flexric/build/examples/xApp /usr/local/flexric/xApp
+ 
++## HARMONY: ONNX Runtime (Dual-Brain xApp; RPATH /opt/onnxruntime/lib)
++COPY --from=oai-flexric-builder /opt/onnxruntime/lib /opt/onnxruntime/lib
++
+ ## Copy E2 agent emulators
+ COPY --from=oai-flexric-builder \
+     /flexric/build/examples/emulator/agent /usr/local/flexric/emulator/agent
+diff --git a/examples/xApp/c/CMakeLists.txt b/examples/xApp/c/CMakeLists.txt
+index 5832a74..509ae40 100644
+--- a/examples/xApp/c/CMakeLists.txt
++++ b/examples/xApp/c/CMakeLists.txt
+@@ -6,4 +6,5 @@ add_subdirectory(slice)
+ add_subdirectory(tc)
+ add_subdirectory(kpm_rc)
+ add_subdirectory(orange)
++add_subdirectory(dual_brain)
+ 
+diff --git a/examples/xApp/c/dual_brain/CMakeLists.txt b/examples/xApp/c/dual_brain/CMakeLists.txt
+new file mode 100644
+index 0000000..13d6e50
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/CMakeLists.txt
+@@ -0,0 +1,36 @@
++# Harmony Dual-Brain congestion-control xApp (needs ONNX Runtime C API + cJSON).
++# Skipped (with a message) when either is missing, so stock FlexRIC builds are unaffected.
++set(ONNXRUNTIME_ROOT "/opt/onnxruntime" CACHE PATH "ONNX Runtime C release root (include/, lib/)")
++find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_c_api.h PATHS ${ONNXRUNTIME_ROOT}/include NO_DEFAULT_PATH)
++find_library(ONNXRUNTIME_LIB onnxruntime PATHS ${ONNXRUNTIME_ROOT}/lib NO_DEFAULT_PATH)
++find_path(CJSON_INCLUDE_DIR cjson/cJSON.h)
++find_library(CJSON_LIB cjson)
++
++if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIB OR NOT CJSON_INCLUDE_DIR OR NOT CJSON_LIB)
++  message(STATUS "dual_brain xApp: skipped (ONNX Runtime at ONNXRUNTIME_ROOT=${ONNXRUNTIME_ROOT} and libcjson-dev required)")
++  return()
++endif()
++
++add_library(harmony_cc_model STATIC cc_model.c)
++target_include_directories(harmony_cc_model PUBLIC ${ONNXRUNTIME_INCLUDE_DIR} ${CJSON_INCLUDE_DIR})
++target_link_libraries(harmony_cc_model PUBLIC ${ONNXRUNTIME_LIB} ${CJSON_LIB} m)
++set_target_properties(harmony_cc_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
++
++add_executable(xapp_congestion_ctrl
++               xapp_congestion_ctrl.c
++               ../../../../src/util/alg_ds/alg/defer.c
++               ../../../../src/util/time_now_us.c)
++target_link_libraries(xapp_congestion_ctrl PUBLIC e42_xapp harmony_cc_model -pthread -lsctp -ldl)
++set_target_properties(xapp_congestion_ctrl PROPERTIES BUILD_RPATH ${ONNXRUNTIME_ROOT}/lib INSTALL_RPATH ${ONNXRUNTIME_ROOT}/lib)
++
++# Parity test: C model path vs NeuralSmith predictions on holdout.csv.
++add_executable(cc_assoc_test cc_assoc_test.c)
++add_executable(cc_policy_test cc_policy_test.c)
++add_executable(cc_model_test cc_model_test.c)
++target_link_libraries(cc_model_test PRIVATE harmony_cc_model)
++set_target_properties(cc_model_test PROPERTIES BUILD_RPATH ${ONNXRUNTIME_ROOT}/lib INSTALL_RPATH ${ONNXRUNTIME_ROOT}/lib)
++
++# R1 parity replay: recorded windows through the xApp's feature + model path (r1/zto/parity.py).
++add_executable(cc_replay cc_replay.c)
++target_link_libraries(cc_replay PRIVATE harmony_cc_model)
++set_target_properties(cc_replay PROPERTIES BUILD_RPATH ${ONNXRUNTIME_ROOT}/lib INSTALL_RPATH ${ONNXRUNTIME_ROOT}/lib)
+diff --git a/examples/xApp/c/dual_brain/cc_assoc.h b/examples/xApp/c/dual_brain/cc_assoc.h
+new file mode 100644
+index 0000000..31c5d4b
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_assoc.h
+@@ -0,0 +1,18 @@
++/* Which UEs the congestion xApp puts into the capped (best-effort) slice on a reservation.
++ *
++ *  protected_ref >= 0  (R1)     every UE except the protected one (KPM RAN UE ID) — capped
++ *                               *together*: the slice quota is shared by its members, so two heavy
++ *                               UEs cannot absorb the PRBs freed for the protected UE.
++ *  protected_ref <  0  (legacy) only the congestor (the UE with the highest recent PRB share).
++ */
++#ifndef HARMONY_CC_ASSOC_H
++#define HARMONY_CC_ASSOC_H
++
++#include <stdint.h>
++
++static inline int cc_capped(uint64_t ue_ref, uint64_t congestor_ref, long long protected_ref)
++{
++  return protected_ref >= 0 ? ue_ref != (uint64_t)protected_ref : ue_ref == congestor_ref;
++}
++
++#endif
+diff --git a/examples/xApp/c/dual_brain/cc_assoc_test.c b/examples/xApp/c/dual_brain/cc_assoc_test.c
+new file mode 100644
+index 0000000..d63c371
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_assoc_test.c
+@@ -0,0 +1,18 @@
++/* Self-check of cc_capped(): build + run, exits 0 on success. */
++#include "cc_assoc.h"
++
++#include <assert.h>
++#include <stdio.h>
++
++int main(void)
++{
++  /* R1: UE refs 1, 2 (center), 3 (protected); congestor = 1 */
++  assert(cc_capped(1, 1, 3) && cc_capped(2, 1, 3) && !cc_capped(3, 1, 3)); /* both center UEs capped */
++  assert(cc_capped(3, 3, 3) == 0); /* the protected UE is never capped, even if it is the congestor */
++  /* legacy (MILCOM): only the congestor */
++  assert(cc_capped(1, 1, -1) && !cc_capped(2, 1, -1) && !cc_capped(3, 1, -1));
++  /* RAN UE ID 0 is a valid protected id */
++  assert(!cc_capped(0, 1, 0) && cc_capped(1, 1, 0));
++  puts("cc_assoc_test: ok");
++  return 0;
++}
+diff --git a/examples/xApp/c/dual_brain/cc_model.c b/examples/xApp/c/dual_brain/cc_model.c
+new file mode 100644
+index 0000000..2f07f91
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_model.c
+@@ -0,0 +1,279 @@
++#include "cc_model.h"
++
++#include <cjson/cJSON.h>
++#include <onnxruntime_c_api.h>
++
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++const char* const cc_window_feature_names[CC_N_WINDOW_FEATURES] = {
++    "prb_mean", "prb_std", "prb_min", "prb_slope",                               /* original names */
++    "mean_prb", "std_prb", "min_prb", "max_prb", "slope_prb", "last_prb"};       /* R1 builder names */
++
++void cc_window_features(const double* x, size_t n, double period_ms, double out[CC_N_WINDOW_FEATURES])
++{
++  double sum = 0, mn = n ? x[0] : 0, mx = n ? x[0] : 0;
++  for (size_t i = 0; i < n; i++) {
++    sum += x[i];
++    if (x[i] < mn)
++      mn = x[i];
++    if (x[i] > mx)
++      mx = x[i];
++  }
++  double mean = n ? sum / (double)n : 0;
++  double var = 0, sxy = 0, sxx = 0, tbar = n ? (n - 1) / 2.0 : 0;
++  for (size_t i = 0; i < n; i++) {
++    var += (x[i] - mean) * (x[i] - mean);
++    sxy += ((double)i - tbar) * (x[i] - mean);
++    sxx += ((double)i - tbar) * ((double)i - tbar);
++  }
++  double std = n ? sqrt(var / (double)n) : 0, slope = sxx > 0 ? sxy / sxx : 0;
++  out[0] = mean;
++  out[1] = std;
++  out[2] = mn;
++  out[3] = slope;
++  out[4] = mean;
++  out[5] = std;
++  out[6] = mn;
++  out[7] = mx;
++  out[8] = period_ms > 0 ? slope * 1000.0 / period_ms : 0; /* % per second */
++  out[9] = n ? x[n - 1] : 0;
++}
++
++struct cc_model {
++  const OrtApi* api;
++  OrtEnv* env;
++  OrtSession* sess;
++  OrtMemoryInfo* mem;
++  char* input_name;
++  char* out_label;
++  char* out_proba;
++  size_t n_feat;
++  char* feat[CC_MAX_FEATURES];
++  double impute[CC_MAX_FEATURES], mean[CC_MAX_FEATURES], scale[CC_MAX_FEATURES];
++  int mask[CC_MAX_FEATURES];
++  size_t n_used;
++  int n_classes;
++  char* classes[8];
++};
++
++static char* read_file(const char* path)
++{
++  FILE* f = fopen(path, "rb");
++  if (!f)
++    return NULL;
++  fseek(f, 0, SEEK_END);
++  long sz = ftell(f);
++  rewind(f);
++  char* buf = calloc(1, (size_t)sz + 1);
++  if (buf && fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
++    free(buf);
++    buf = NULL;
++  }
++  fclose(f);
++  return buf;
++}
++
++static int ort_fail(cc_model_t* m, OrtStatus* st, char* err, size_t errlen)
++{
++  if (!st)
++    return 0;
++  snprintf(err, errlen, "onnxruntime: %s", m->api->GetErrorMessage(st));
++  m->api->ReleaseStatus(st);
++  return -1;
++}
++
++static int load_preprocess(cc_model_t* m, const char* path, char* err, size_t errlen)
++{
++  char* txt = read_file(path);
++  if (!txt) {
++    snprintf(err, errlen, "cannot read %s", path);
++    return -1;
++  }
++  cJSON* j = cJSON_Parse(txt);
++  free(txt);
++  if (!j) {
++    snprintf(err, errlen, "invalid JSON in %s", path);
++    return -1;
++  }
++  int rc = -1;
++  cJSON* feats = cJSON_GetObjectItem(j, "features");
++  cJSON* imp = cJSON_GetObjectItem(j, "impute");
++  cJSON* mean = cJSON_GetObjectItem(j, "mean");
++  cJSON* scale = cJSON_GetObjectItem(j, "scale");
++  cJSON* mask = cJSON_GetObjectItem(j, "mask");
++  cJSON* classes = cJSON_GetObjectItem(j, "classes");
++  int n = cJSON_GetArraySize(feats);
++  if (n <= 0 || n > CC_MAX_FEATURES || cJSON_GetArraySize(imp) != n || cJSON_GetArraySize(mean) != n
++      || cJSON_GetArraySize(scale) != n || cJSON_GetArraySize(mask) != n || cJSON_GetArraySize(classes) < 2
++      || cJSON_GetArraySize(classes) > 8) {
++    snprintf(err, errlen, "preprocess.json: inconsistent features/impute/mean/scale/mask/classes");
++    goto out;
++  }
++  m->n_feat = (size_t)n;
++  m->n_used = 0;
++  for (int i = 0; i < n; i++) {
++    m->feat[i] = strdup(cJSON_GetArrayItem(feats, i)->valuestring);
++    m->impute[i] = cJSON_GetArrayItem(imp, i)->valuedouble;
++    m->mean[i] = cJSON_GetArrayItem(mean, i)->valuedouble;
++    m->scale[i] = cJSON_GetArrayItem(scale, i)->valuedouble;
++    m->mask[i] = cJSON_IsTrue(cJSON_GetArrayItem(mask, i));
++    m->n_used += (size_t)m->mask[i];
++  }
++  m->n_classes = cJSON_GetArraySize(classes);
++  for (int i = 0; i < m->n_classes; i++) {
++    cJSON* c = cJSON_GetArrayItem(classes, i);
++    char buf[64];
++    if (cJSON_IsString(c))
++      snprintf(buf, sizeof(buf), "%s", c->valuestring);
++    else if (c->valuedouble == (double)(long long)c->valuedouble)
++      snprintf(buf, sizeof(buf), "%lld", (long long)c->valuedouble);
++    else
++      snprintf(buf, sizeof(buf), "%g", c->valuedouble);
++    m->classes[i] = strdup(buf);
++  }
++  rc = 0;
++out:
++  cJSON_Delete(j);
++  return rc;
++}
++
++cc_model_t* cc_model_load(const char* onnx_path, const char* preprocess_path, char* err, size_t errlen)
++{
++  cc_model_t* m = calloc(1, sizeof(*m));
++  m->api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
++  if (load_preprocess(m, preprocess_path, err, errlen) != 0)
++    goto fail;
++
++  OrtSessionOptions* so = NULL;
++  if (ort_fail(m, m->api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "harmony-cc", &m->env), err, errlen)
++      || ort_fail(m, m->api->CreateSessionOptions(&so), err, errlen))
++    goto fail;
++  m->api->SetIntraOpNumThreads(so, 1);
++  m->api->SetInterOpNumThreads(so, 1);
++  m->api->SetSessionGraphOptimizationLevel(so, ORT_ENABLE_ALL);
++  OrtStatus* st = m->api->CreateSession(m->env, onnx_path, so, &m->sess);
++  m->api->ReleaseSessionOptions(so);
++  if (ort_fail(m, st, err, errlen))
++    goto fail;
++  if (ort_fail(m, m->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &m->mem), err, errlen))
++    goto fail;
++
++  OrtAllocator* alloc = NULL;
++  m->api->GetAllocatorWithDefaultOptions(&alloc);
++  size_t n_in = 0, n_out = 0;
++  m->api->SessionGetInputCount(m->sess, &n_in);
++  m->api->SessionGetOutputCount(m->sess, &n_out);
++  if (n_in != 1 || n_out < 2) {
++    snprintf(err, errlen, "model must have 1 input and label+probabilities outputs (got %zu/%zu)", n_in, n_out);
++    goto fail;
++  }
++  char* tmp = NULL;
++  m->api->SessionGetInputName(m->sess, 0, alloc, &tmp);
++  m->input_name = strdup(tmp);
++  m->api->AllocatorFree(alloc, tmp);
++  m->api->SessionGetOutputName(m->sess, 0, alloc, &tmp);
++  m->out_label = strdup(tmp);
++  m->api->AllocatorFree(alloc, tmp);
++  m->api->SessionGetOutputName(m->sess, 1, alloc, &tmp);
++  m->out_proba = strdup(tmp);
++  m->api->AllocatorFree(alloc, tmp);
++
++  /* Probabilities must be a plain tensor (skl2onnx without ZipMap). */
++  OrtTypeInfo* ti = NULL;
++  m->api->SessionGetOutputTypeInfo(m->sess, 1, &ti);
++  enum ONNXType ot;
++  m->api->GetOnnxTypeFromTypeInfo(ti, &ot);
++  m->api->ReleaseTypeInfo(ti);
++  if (ot != ONNX_TYPE_TENSOR) {
++    snprintf(err, errlen, "output '%s' is not a tensor (ZipMap export not supported)", m->out_proba);
++    goto fail;
++  }
++  return m;
++fail:
++  cc_model_free(m);
++  return NULL;
++}
++
++void cc_model_free(cc_model_t* m)
++{
++  if (!m)
++    return;
++  if (m->sess)
++    m->api->ReleaseSession(m->sess);
++  if (m->mem)
++    m->api->ReleaseMemoryInfo(m->mem);
++  if (m->env)
++    m->api->ReleaseEnv(m->env);
++  for (size_t i = 0; i < m->n_feat; i++)
++    free(m->feat[i]);
++  for (int i = 0; i < m->n_classes; i++)
++    free(m->classes[i]);
++  free(m->input_name);
++  free(m->out_label);
++  free(m->out_proba);
++  free(m);
++}
++
++size_t cc_model_n_features(cc_model_t const* m) { return m->n_feat; }
++const char* cc_model_feature_name(cc_model_t const* m, size_t i) { return i < m->n_feat ? m->feat[i] : NULL; }
++const char* cc_model_class_label(cc_model_t const* m, int idx) { return idx >= 0 && idx < m->n_classes ? m->classes[idx] : NULL; }
++
++int cc_model_class_index(cc_model_t const* m, const char* label)
++{
++  for (int i = 0; i < m->n_classes; i++)
++    if (strcmp(m->classes[i], label) == 0)
++      return i;
++  return -1;
++}
++
++static double now_us(void)
++{
++  struct timespec t;
++  clock_gettime(CLOCK_MONOTONIC, &t);
++  return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
++}
++
++int cc_model_predict(cc_model_t* m, const double* raw, int* label_idx, double* proba, double* latency_us,
++                     char* err, size_t errlen)
++{
++  double t0 = now_us();
++  float x[CC_MAX_FEATURES];
++  size_t k = 0;
++  for (size_t i = 0; i < m->n_feat; i++) {
++    if (!m->mask[i])
++      continue;
++    double v = isnan(raw[i]) ? m->impute[i] : raw[i];
++    x[k++] = (float)((v - m->mean[i]) / m->scale[i]);
++  }
++  int64_t shape[2] = {1, (int64_t)m->n_used};
++  OrtValue* in = NULL;
++  if (ort_fail(m, m->api->CreateTensorWithDataAsOrtValue(m->mem, x, k * sizeof(float), shape, 2,
++                                                         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in), err, errlen))
++    return -1;
++  const char* in_names[1] = {m->input_name};
++  const char* out_names[1] = {m->out_proba};
++  OrtValue* out = NULL;
++  OrtStatus* st = m->api->Run(m->sess, NULL, in_names, (const OrtValue* const*)&in, 1, out_names, 1, &out);
++  m->api->ReleaseValue(in);
++  if (ort_fail(m, st, err, errlen))
++    return -1;
++
++  /* Predicted class = argmax(probabilities) — what the estimator's predict() does. */
++  float* p = NULL;
++  m->api->GetTensorMutableData(out, (void**)&p);
++  int best = 0;
++  for (int c = 0; c < m->n_classes; c++) {
++    proba[c] = p[c];
++    if (p[c] > p[best])
++      best = c;
++  }
++  *label_idx = best;
++  m->api->ReleaseValue(out);
++  if (latency_us)
++    *latency_us = now_us() - t0;
++  return 0;
++}
+diff --git a/examples/xApp/c/dual_brain/cc_model.h b/examples/xApp/c/dual_brain/cc_model.h
+new file mode 100644
+index 0000000..4c1a58d
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_model.h
+@@ -0,0 +1,47 @@
++/*
++ * Harmony Dual-Brain congestion xApp — model layer.
++ *
++ * Loads a NeuralSmith bundle (model.onnx + preprocess.json) and reproduces
++ * neuralsmith.preprocess_data exactly: column order → impute → StandardScaler →
++ * feature mask, then ONNX Runtime (CPU, 1 thread). Also computes the sliding-
++ * window features the model is trained on, so training and serving share one
++ * implementation (the xApp emits these features in collect mode).
++ */
++#ifndef HARMONY_CC_MODEL_H
++#define HARMONY_CC_MODEL_H
++
++#include <stddef.h>
++
++#define CC_MAX_FEATURES 32
++#define CC_N_WINDOW_FEATURES 10
++
++/* Window features by name. 0-3: the original rApp names (slope per sample; MILCOM/dualbrain6 bundles).
++ * 4-9 (dualbrain9, COMMAG-R1): the R1 dataset builder's names and definitions (r1/dataset/build.py):
++ * mean_prb, std_prb (population), min_prb, max_prb, slope_prb (least squares, % per SECOND, from the KPM
++ * period), last_prb. A model input is looked up by its preprocess.json name in this table. */
++extern const char* const cc_window_feature_names[CC_N_WINDOW_FEATURES];
++
++/* x[0..n-1] oldest → newest, sampled every period_ms. */
++void cc_window_features(const double* x, size_t n, double period_ms, double out[CC_N_WINDOW_FEATURES]);
++
++typedef struct cc_model cc_model_t;
++
++/* NULL on error (message in err). */
++cc_model_t* cc_model_load(const char* onnx_path, const char* preprocess_path, char* err, size_t errlen);
++void cc_model_free(cc_model_t* m);
++
++/* Feature names the model expects (preprocess.json "features"), in order. */
++size_t cc_model_n_features(cc_model_t const* m);
++const char* cc_model_feature_name(cc_model_t const* m, size_t i);
++
++/* Index of the class label given as string (e.g. "1"), or -1. */
++int cc_model_class_index(cc_model_t const* m, const char* label);
++const char* cc_model_class_label(cc_model_t const* m, int idx);
++
++/* raw: values in cc_model_feature_name() order (NaN = missing → impute).
++ * Returns 0 on success; *label_idx = predicted class index, proba[] = per-class
++ * probability (len = number of classes), *latency_us = preprocess + inference. */
++int cc_model_predict(cc_model_t* m, const double* raw, int* label_idx, double* proba, double* latency_us,
++                     char* err, size_t errlen);
++
++#endif
+diff --git a/examples/xApp/c/dual_brain/cc_model_test.c b/examples/xApp/c/dual_brain/cc_model_test.c
+new file mode 100644
+index 0000000..1a804ba
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_model_test.c
+@@ -0,0 +1,131 @@
++/*
++ * Parity test: the xApp's C model path (preprocess.json + ONNX Runtime) must
++ * reproduce NeuralSmith's own predictions on the held-out file the /train
++ * wrapper exports (holdout.csv: features, label, ns_pred, ns_proba).
++ *
++ *   cc_model_test <bundle_dir> [positive_label=1] [proba_tol=1e-4]
++ *
++ * Exit 0 only when every row's class matches ns_pred and |p - ns_proba| <= tol.
++ * Also prints per-inference latency (p50/p99) against the 5 ms budget.
++ */
++#include "cc_model.h"
++
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define MAX_COLS 64
++#define MAX_ROWS 100000
++
++static int split_csv(char* line, char** cols, int max)
++{
++  int n = 0;
++  char* save = NULL;
++  line[strcspn(line, "\r\n")] = 0;
++  for (char* tok = strtok_r(line, ",", &save); tok && n < max; tok = strtok_r(NULL, ",", &save))
++    cols[n++] = tok;
++  return n;
++}
++
++static int cmp_d(const void* a, const void* b)
++{
++  double x = *(const double*)a, y = *(const double*)b;
++  return (x > y) - (x < y);
++}
++
++int main(int argc, char** argv)
++{
++  if (argc < 2) {
++    fprintf(stderr, "usage: %s <bundle_dir> [positive_label] [proba_tol]\n", argv[0]);
++    return 2;
++  }
++  const char* pos_label = argc > 2 ? argv[2] : "1";
++  double tol = argc > 3 ? atof(argv[3]) : 1e-4;
++  char p_onnx[1024], p_pre[1024], p_hold[1024], err[512];
++  snprintf(p_onnx, sizeof(p_onnx), "%s/model.onnx", argv[1]);
++  snprintf(p_pre, sizeof(p_pre), "%s/preprocess.json", argv[1]);
++  snprintf(p_hold, sizeof(p_hold), "%s/holdout.csv", argv[1]);
++
++  cc_model_t* m = cc_model_load(p_onnx, p_pre, err, sizeof(err));
++  if (!m) {
++    fprintf(stderr, "load failed: %s\n", err);
++    return 1;
++  }
++  int pos = cc_model_class_index(m, pos_label);
++  if (pos < 0) {
++    fprintf(stderr, "positive label %s not among model classes\n", pos_label);
++    return 1;
++  }
++
++  FILE* f = fopen(p_hold, "r");
++  if (!f) {
++    fprintf(stderr, "cannot open %s\n", p_hold);
++    return 1;
++  }
++  char line[8192], *cols[MAX_COLS];
++  if (!fgets(line, sizeof(line), f)) {
++    fprintf(stderr, "empty holdout\n");
++    return 1;
++  }
++  int nh = split_csv(line, cols, MAX_COLS);
++  int fidx[CC_MAX_FEATURES], i_pred = -1, i_proba = -1;
++  char hdr_copy[MAX_COLS][64];
++  for (int c = 0; c < nh; c++)
++    snprintf(hdr_copy[c], sizeof(hdr_copy[c]), "%s", cols[c]);
++  for (size_t k = 0; k < cc_model_n_features(m); k++) {
++    fidx[k] = -1;
++    for (int c = 0; c < nh; c++)
++      if (strcmp(hdr_copy[c], cc_model_feature_name(m, k)) == 0)
++        fidx[k] = c;
++    if (fidx[k] < 0) {
++      fprintf(stderr, "holdout.csv lacks feature column %s\n", cc_model_feature_name(m, k));
++      return 1;
++    }
++  }
++  for (int c = 0; c < nh; c++) {
++    if (strcmp(hdr_copy[c], "ns_pred") == 0)
++      i_pred = c;
++    if (strcmp(hdr_copy[c], "ns_proba") == 0)
++      i_proba = c;
++  }
++  if (i_pred < 0 || i_proba < 0) {
++    fprintf(stderr, "holdout.csv lacks ns_pred/ns_proba\n");
++    return 1;
++  }
++
++  static double lat[MAX_ROWS];
++  int rows = 0, label_mismatch = 0, proba_mismatch = 0;
++  double max_diff = 0;
++  while (fgets(line, sizeof(line), f) && rows < MAX_ROWS) {
++    if (split_csv(line, cols, MAX_COLS) < nh)
++      continue;
++    double raw[CC_MAX_FEATURES], proba[8];
++    for (size_t k = 0; k < cc_model_n_features(m); k++)
++      raw[k] = strtod(cols[fidx[k]], NULL);
++    int idx = -1;
++    if (cc_model_predict(m, raw, &idx, proba, &lat[rows], err, sizeof(err)) != 0) {
++      fprintf(stderr, "predict failed: %s\n", err);
++      return 1;
++    }
++    /* ns_pred may be written as "1" or "1.0" */
++    double want = strtod(cols[i_pred], NULL);
++    double got = strtod(cc_model_class_label(m, idx), NULL);
++    if (want != got)
++      label_mismatch++;
++    double d = fabs(proba[pos] - strtod(cols[i_proba], NULL));
++    if (d > max_diff)
++      max_diff = d;
++    if (d > tol)
++      proba_mismatch++;
++    rows++;
++  }
++  fclose(f);
++  qsort(lat, (size_t)rows, sizeof(double), cmp_d);
++  double p50 = rows ? lat[rows / 2] / 1000.0 : 0, p99 = rows ? lat[(int)(rows * 0.99)] / 1000.0 : 0;
++  printf("{\"rows\":%d,\"label_mismatch\":%d,\"proba_mismatch\":%d,\"max_proba_diff\":%.3g,"
++         "\"latency_ms_p50\":%.4f,\"latency_ms_p99\":%.4f}\n",
++         rows, label_mismatch, proba_mismatch, max_diff, p50, p99);
++  cc_model_free(m);
++  return (rows > 0 && label_mismatch == 0 && proba_mismatch == 0 && p99 < 5.0) ? 0 : 1;
++}
+diff --git a/examples/xApp/c/dual_brain/cc_policy.h b/examples/xApp/c/dual_brain/cc_policy.h
+new file mode 100644
+index 0000000..80a8b9f
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_policy.h
+@@ -0,0 +1,57 @@
++/* Trigger decision of the congestion xApp, one call per KPM sample (R1, dualbrain8).
++ *
++ *  threshold policy = persistence baseline: "hot" once cell PRB >= threshold has held for
++ *      min_duration_samples consecutive samples (the dataset label's sustained rule, evaluated at t);
++ *      it acts on the first hot sample (no extra debounce — the sustain already is one).
++ *  ml policy: acts after trigger_consecutive consecutive positive predictions (debounce; the template
++ *      slot control.debounce_n, default ceil(1000 / T_s)), so a 1-2 s post-idle MCS spike cannot trigger it.
++ */
++#ifndef HARMONY_CC_POLICY_H
++#define HARMONY_CC_POLICY_H
++
++static inline int cc_threshold_hot(int* above_streak, double cell, double threshold, int min_duration_samples)
++{
++  *above_streak = cell >= threshold ? *above_streak + 1 : 0;
++  return *above_streak >= (min_duration_samples > 0 ? min_duration_samples : 1);
++}
++
++static inline int cc_should_trigger(int threshold_policy, int hot_streak, int trigger_consecutive)
++{
++  return hot_streak >= (threshold_policy ? 1 : trigger_consecutive);
++}
++
++/* Lease release (dualbrain10, R1): under the cap, cell PRB and the model no longer separate congestion from its
++ * aftermath (the capped UEs drain their backlog at <= 100 - reserve_pct %), so release is time-based. The lease is a
++ * minimum hold: the reservation is kept for lease_samples after it starts; after that it stays only while the policy
++ * is hot and lifts at the first non-hot sample (2026-11-04: full-lease renewal held the cap through the next ON when
++ * the lease expired during the backlog drain). Same rule for every policy.
++ * Returns 0 keep (within the lease), 1 extended (past the lease, hot), 2 release. *lease_start is not changed. */
++#define CC_LEASE_KEEP 0
++#define CC_LEASE_RENEW 1
++#define CC_LEASE_RELEASE 2
++static inline int cc_lease_step(unsigned long long samples, unsigned long long* lease_start, int lease_samples, int hot)
++{
++  if (samples - *lease_start < (unsigned long long)lease_samples)
++    return CC_LEASE_KEEP;
++  return hot ? CC_LEASE_RENEW : CC_LEASE_RELEASE;
++}
++
++/* Re-arm after release (dualbrain11, R1, 2026-11-05): when the cap lifts, the capped UEs drain their backlog and the
++ * cell jumps back up, which made the policy re-trigger 2.5 s after every release (Exp-04 dry run 6). After a release
++ * the trigger is disarmed; it re-arms only once cell PRB has stayed below the label threshold for the label's
++ * min_duration_samples (the spec's own congestion rule, no new constant). The debounce is unchanged. Same rule for
++ * every policy. Call once per sample while disarmed; returns 1 on the sample that re-arms. */
++static inline int cc_rearm_step(int* armed, int* below_streak, double cell, double threshold, int min_duration_samples)
++{
++  if (*armed)
++    return 0;
++  *below_streak = cell < threshold ? *below_streak + 1 : 0;
++  if (*below_streak >= (min_duration_samples > 0 ? min_duration_samples : 1)) {
++    *armed = 1;
++    *below_streak = 0;
++    return 1;
++  }
++  return 0;
++}
++
++#endif
+diff --git a/examples/xApp/c/dual_brain/cc_policy_test.c b/examples/xApp/c/dual_brain/cc_policy_test.c
+new file mode 100644
+index 0000000..51312ed
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_policy_test.c
+@@ -0,0 +1,44 @@
++/* Self-check of cc_policy.h: build + run, exits 0 on success. */
++#include "cc_policy.h"
++
++#include <assert.h>
++#include <stdio.h>
++
++int main(void)
++{
++  int s = 0;
++  /* sustained >= 80 for 3 samples; 80.0 counts (>=), a dip resets */
++  double cells[] = {90, 90, 70, 80, 85, 81, 95};
++  int want[] = {0, 0, 0, 0, 0, 1, 1};
++  for (int i = 0; i < 7; i++)
++    assert(cc_threshold_hot(&s, cells[i], 80, 3) == want[i]);
++  s = 0; /* min_duration 0/1 = plain threshold */
++  assert(cc_threshold_hot(&s, 80, 80, 0) == 1 && cc_threshold_hot(&s, 79.9, 80, 1) == 0);
++  /* threshold acts on the first hot sample; ml needs trigger_consecutive positives */
++  assert(cc_should_trigger(1, 1, 4) && !cc_should_trigger(0, 3, 4) && cc_should_trigger(0, 4, 4));
++  /* lease = minimum hold: keep within it; after it, extend while hot, release at the first non-hot sample */
++  unsigned long long ls = 10;
++  assert(cc_lease_step(14, &ls, 5, 0) == CC_LEASE_KEEP);
++  assert(cc_lease_step(15, &ls, 5, 1) == CC_LEASE_RENEW && ls == 10);
++  assert(cc_lease_step(16, &ls, 5, 1) == CC_LEASE_RENEW);
++  assert(cc_lease_step(17, &ls, 5, 0) == CC_LEASE_RELEASE);
++  /* re-arm: armed stays armed; disarmed re-arms after min_duration samples strictly below the threshold;
++   * a drain above the threshold (or a single dip) does not re-arm */
++  int armed = 1, below = 0;
++  assert(cc_rearm_step(&armed, &below, 99, 80, 3) == 0 && armed == 1);
++  armed = 0;
++  double drain[] = {97, 95, 79, 92, 85, 80, 70, 60, 50, 95};
++  int rearm[] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 0};
++  for (int i = 0; i < 10; i++)
++    assert(cc_rearm_step(&armed, &below, drain[i], 80, 3) == rearm[i]);
++  assert(armed == 1);
++  /* xApp/replay order: disarmed → no reserve even with a long hot streak (debounce satisfied) */
++  armed = 0;
++  below = 0;
++  int hot_streak = 10, reserved = 0;
++  if (armed && cc_should_trigger(0, hot_streak, 2))
++    reserved = 1;
++  assert(!reserved);
++  puts("cc_policy_test: ok");
++  return 0;
++}
+diff --git a/examples/xApp/c/dual_brain/cc_replay.c b/examples/xApp/c/dual_brain/cc_replay.c
+new file mode 100644
+index 0000000..cc06495
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/cc_replay.c
+@@ -0,0 +1,169 @@
++/*
++ * Feature/model parity replay (COMMAG-R1): runs recorded KPM windows through the xApp's OWN feature path
++ * (cc_window_features) and model path (preprocess.json + ONNX Runtime) — the code the running xApp uses.
++ *
++ *   cc_replay <bundle_dir> <period_ms> <windows.csv> [positive_label=1]
++ *   cc_replay --policy <bundle_dir> <period_ms> <series.txt> <window> <trigger_consecutive> <lease_samples>
++ *             <threshold_cell_prb> <min_duration_samples>
++ *
++ * --policy (dualbrain10): replays a recorded cell-PRB series (one value per line, KPM order) through the xApp's
++ * window → features → model → debounce (cc_should_trigger) → lease (cc_lease_step) logic, with actuation
++ * simulated (reserve/extend/release at once; no ">= 2 active UEs" condition), with the dualbrain11 re-arm rule
++ * (cc_rearm_step: after a release, no reserve until cell < threshold for min_duration_samples). stdout CSV:
++ * i,cell,proba,pred,action,reserved,armed (action rearm on the re-arming sample unless it also reserves).
++ * The caller checks that the lease expires and the cap lifts in OFF (r1/zto/parity.py).
++ *
++ * windows.csv: one window per line, cell PRB % values oldest → newest, comma-separated (no header).
++ * stdout CSV: header, then per window the R1 builder features (mean_prb,std_prb,min_prb,max_prb,slope_prb,
++ * last_prb) as the xApp computes them, the positive-class probability and the predicted label.
++ * The comparison against r1/dataset/build.py and the offline ONNX prediction is done by the caller
++ * (r1/zto/parity.py), so this tool only reports; exit 1 on a load/predict error.
++ */
++#include "cc_model.h"
++#include "cc_policy.h"
++
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define MAX_WIN 256
++
++static int policy_replay(int argc, char** argv)
++{
++  if (argc < 10) {
++    fprintf(stderr, "usage: %s --policy <bundle_dir> <period_ms> <series.txt> <window> <trigger> <lease_samples> "
++                    "<threshold_cell_prb> <min_duration_samples>\n", argv[0]);
++    return 2;
++  }
++  double period_ms = atof(argv[3]);
++  int window = atoi(argv[5]), trigger = atoi(argv[6]), lease = atoi(argv[7]), min_dur = atoi(argv[9]);
++  double thr = atof(argv[8]);
++  char p_onnx[1024], p_pre[1024], err[512];
++  snprintf(p_onnx, sizeof(p_onnx), "%s/model.onnx", argv[2]);
++  snprintf(p_pre, sizeof(p_pre), "%s/preprocess.json", argv[2]);
++  cc_model_t* m = cc_model_load(p_onnx, p_pre, err, sizeof(err));
++  FILE* f = fopen(argv[4], "r");
++  if (!m || !f || window < 2 || window > MAX_WIN) {
++    fprintf(stderr, "load failed: %s\n", m ? "series/window" : err);
++    return 1;
++  }
++  int pos = cc_model_class_index(m, "1"), hot_streak = 0, reserved = 0, extended = 0, armed = 1, below = 0;
++  double win[MAX_WIN], cell;
++  unsigned long long i = 0, lease_start = 0;
++  char line[256];
++  printf("i,cell,proba,pred,action,reserved,armed\n");
++  while (fgets(line, sizeof(line), f)) {
++    cell = strtod(line, NULL);
++    for (int k = 0; k + 1 < window; k++)
++      win[k] = win[k + 1];
++    win[window - 1] = cell;
++    const char* action = "";
++    double proba[8] = {0}, lat = 0;
++    int pred = 0;
++    if (i + 1 >= (unsigned long long)window) {
++      double feat[CC_N_WINDOW_FEATURES], raw[CC_MAX_FEATURES];
++      cc_window_features(win, (size_t)window, period_ms, feat);
++      for (size_t k = 0; k < cc_model_n_features(m); k++) {
++        raw[k] = NAN;
++        for (int w = 0; w < CC_N_WINDOW_FEATURES; w++)
++          if (strcmp(cc_model_feature_name(m, k), cc_window_feature_names[w]) == 0)
++            raw[k] = feat[w];
++      }
++      int idx = -1;
++      if (cc_model_predict(m, raw, &idx, proba, &lat, err, sizeof(err)) != 0) {
++        fprintf(stderr, "predict failed: %s\n", err);
++        return 1;
++      }
++      pred = proba[pos] >= 0.5;
++      hot_streak = pred ? hot_streak + 1 : 0;
++      if (!reserved && cc_rearm_step(&armed, &below, cell, thr, min_dur))
++        action = "rearm";
++      if (!reserved && armed && cc_should_trigger(0, hot_streak, trigger)) {
++        reserved = 1;
++        extended = 0;
++        lease_start = i;
++        action = "reserve";
++      } else if (reserved) {
++        int a = cc_lease_step(i, &lease_start, lease, pred);
++        if (a == CC_LEASE_RENEW && !extended) {
++          extended = 1;
++          action = "extend";
++        }
++        else if (a == CC_LEASE_RELEASE) {
++          reserved = 0;
++          armed = 0;
++          below = 0;
++          action = "release";
++        }
++      }
++    }
++    printf("%llu,%.2f,%.6f,%d,%s,%d,%d\n", i, cell, proba[pos], pred, action, reserved, armed);
++    i++;
++  }
++  fclose(f);
++  cc_model_free(m);
++  return 0;
++}
++
++int main(int argc, char** argv)
++{
++  if (argc > 1 && strcmp(argv[1], "--policy") == 0)
++    return policy_replay(argc, argv);
++  if (argc < 4) {
++    fprintf(stderr, "usage: %s <bundle_dir> <period_ms> <windows.csv> [positive_label]\n", argv[0]);
++    return 2;
++  }
++  double period_ms = atof(argv[2]);
++  const char* pos_label = argc > 4 ? argv[4] : "1";
++  char p_onnx[1024], p_pre[1024], err[512];
++  snprintf(p_onnx, sizeof(p_onnx), "%s/model.onnx", argv[1]);
++  snprintf(p_pre, sizeof(p_pre), "%s/preprocess.json", argv[1]);
++  cc_model_t* m = cc_model_load(p_onnx, p_pre, err, sizeof(err));
++  if (!m) {
++    fprintf(stderr, "load failed: %s\n", err);
++    return 1;
++  }
++  int pos = cc_model_class_index(m, pos_label);
++  if (pos < 0) {
++    fprintf(stderr, "positive label %s not among model classes\n", pos_label);
++    return 1;
++  }
++  FILE* f = fopen(argv[3], "r");
++  if (!f) {
++    fprintf(stderr, "cannot open %s\n", argv[3]);
++    return 1;
++  }
++  printf("mean_prb,std_prb,min_prb,max_prb,slope_prb,last_prb,proba,pred,unmatched_inputs\n");
++  char line[16384];
++  while (fgets(line, sizeof(line), f)) {
++    double x[MAX_WIN];
++    size_t n = 0;
++    char* save = NULL;
++    line[strcspn(line, "\r\n")] = 0;
++    for (char* tok = strtok_r(line, ",", &save); tok && n < MAX_WIN; tok = strtok_r(NULL, ",", &save))
++      x[n++] = strtod(tok, NULL);
++    if (n < 2)
++      continue;
++    double feat[CC_N_WINDOW_FEATURES], raw[CC_MAX_FEATURES], proba[8] = {0}, lat = 0;
++    cc_window_features(x, n, period_ms, feat);
++    int unmatched = 0; /* same lookup as xapp_congestion_ctrl.c: model input by name */
++    for (size_t k = 0; k < cc_model_n_features(m); k++) {
++      raw[k] = NAN;
++      for (int w = 0; w < CC_N_WINDOW_FEATURES; w++)
++        if (strcmp(cc_model_feature_name(m, k), cc_window_feature_names[w]) == 0)
++          raw[k] = feat[w];
++      unmatched += isnan(raw[k]);
++    }
++    int idx = -1;
++    if (cc_model_predict(m, raw, &idx, proba, &lat, err, sizeof(err)) != 0) {
++      fprintf(stderr, "predict failed: %s\n", err);
++      return 1;
++    }
++    printf("%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%s,%d\n", feat[4], feat[5], feat[6], feat[7], feat[8], feat[9],
++           proba[pos], cc_model_class_label(m, idx), unmatched);
++  }
++  fclose(f);
++  cc_model_free(m);
++  return 0;
++}
+diff --git a/examples/xApp/c/dual_brain/test_parity.sh b/examples/xApp/c/dual_brain/test_parity.sh
+new file mode 100755
+index 0000000..152b54c
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/test_parity.sh
+@@ -0,0 +1,35 @@
++#!/usr/bin/env bash
++# Parity test: xApp C model path vs NeuralSmith on a held-out file.
++#   1. train a bundle with the NeuralSmith service image (offline: --network none)
++#   2. run cc_model_test (the xApp's own preprocess + ONNX code) in the RIC image
++# Passes only if every held-out prediction matches NeuralSmith's and p99 < 5 ms.
++#   BUNDLE=<dir> skips step 1 (e.g. a bundle downloaded from /models/latest).
++set -euo pipefail
++NS_IMAGE="${NS_IMAGE:-localhost/harmony/neuralsmith:1.2.1}"
++RIC_IMAGE="${RIC_IMAGE:-localhost/harmony/flexric:kpm-sd-dualbrain}"
++WORK="${WORK:-$(mktemp -d)}"
++DATA="${DATA:-}"
++
++if [[ -z "${BUNDLE:-}" ]]; then
++  mkdir -p "$WORK/out"
++  data_mount=()
++  data_arg=/app/selftest/selftest.csv
++  if [[ -n "$DATA" ]]; then
++    data_mount=(-v "$(cd "$(dirname "$DATA")" && pwd):/in:ro")
++    data_arg="/in/$(basename "$DATA")"
++  fi
++  docker run --rm -i --network none --cpus 8 -u "$(id -u):$(id -g)" -e HOME=/tmp \
++    -v "$WORK/out:/out" "${data_mount[@]}" "$NS_IMAGE" python - "$data_arg" <<'EOF'
++import json, sys
++from pathlib import Path
++from service import export
++r = export.train_bundle(Path(sys.argv[1]), Path("/out"), target="congested", latency_budget_ms=5.0,
++                        mode="fast++", cpus=8, holdout_frac=0.2, seed=11, positive_label="1", timeout_s=1800)
++print(json.dumps({k: r[k] for k in ("algorithm", "accuracy", "f1", "inference_latency_ms", "n_holdout")}))
++EOF
++  BUNDLE="$WORK/out/bundle"
++fi
++
++docker run --rm --network none -v "$(cd "$BUNDLE" && pwd):/b:ro" --entrypoint \
++  /usr/local/flexric/xApp/c/dual_brain/cc_model_test "$RIC_IMAGE" /b 1 1e-4
++echo "parity OK ($BUNDLE)"
+diff --git a/examples/xApp/c/dual_brain/xapp_congestion_ctrl.c b/examples/xApp/c/dual_brain/xapp_congestion_ctrl.c
+new file mode 100644
+index 0000000..19cd245
+--- /dev/null
++++ b/examples/xApp/c/dual_brain/xapp_congestion_ctrl.c
+@@ -0,0 +1,827 @@
++/*
++ * Harmony Dual-Brain congestion-control xApp.
++ *
++ * E2SM-KPM (report style 4, per UE) → aggregate cell PRB utilization (sum of
++ * per-UE RRU.PrbTot{Dl,Ul} %) → sliding-window features (mean, std, min, slope)
++ * → NeuralSmith ONNX model → on predicted congestion, FlexRIC SLICE control
++ * reserving `reserve_pct` of the PRBs for the edge UE (Harmony gNB: SLICE SM →
++ * AURA quota, DL only). Releases the reservation after sustained normal load.
++ *
++ * Modes (config "mode"):
++ *   collect  emit samples + features only (training data for the rApp)
++ *   control  collect + predict + act
++ *
++ * Config: JSON at $XAPP_CC_CONFIG (default /tmp/dualbrain/config.json); see
++ * docs/features/dual-brain-demo.md. Events: JSON lines at "events_path".
++ * UEs are discovered from the KPM reports (RAN UE ID); nothing is hard-coded.
++ * Run with XAPP_DURATION=-1 to keep it running.
++ */
++#include "../../../../src/xApp/e42_xapp_api.h"
++#include "../../../../src/sm/slice_sm/slice_sm_id.h"
++#include "cc_assoc.h"
++#include "cc_policy.h"
++#include "../../../../src/util/alg_ds/alg/defer.h"
++#include "../../../../src/util/time_now_us.h"
++#include "../../../../src/util/e.h"
++
++#include "cc_model.h"
++
++#include <cjson/cJSON.h>
++
++#include <assert.h>
++#include <stdarg.h>
++#include <math.h>
++#include <pthread.h>
++#include <signal.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#define MAX_UES 32
++#define MAX_WINDOW 256
++#define KPM_RAN_FUNC_ID 2
++
++/* ------------------------------------------------------------------ config */
++
++typedef struct {
++  char mode[16];
++  char policy[16]; /* ml (NeuralSmith model) | threshold (persistence baseline: cell PRB >= threshold_cell_prb
++                      sustained for min_duration_samples, cc_policy.h) */
++  double threshold_cell_prb;
++  int min_duration_samples;
++  char model_path[512];
++  char preprocess_path[512];
++  char events_path[512];
++  char raw_dump_path[512];
++  char aux_metric[64]; /* optional 2nd KPM measurement in the same subscription ("" = none); logged only */ /* debug: every KPM indication, unprocessed ("" = off) */
++  char metric[64];
++  char positive_label[16];
++  char edge_policy[32];
++  int kpm_period_ms;
++  int window;
++  double prob_threshold;
++  int trigger_consecutive;
++  int release_after_normal;
++  int min_hold_samples;
++  int lease_samples; /* > 0: lease release (lease_s from config.json), else the legacy calm rule */
++  double lease_s;
++  double release_below_cell_prb;
++  int reserve_pct;
++  int edge_window;
++  int congestor_window;
++  int be_slice_id;
++  long long protected_ue_ref; /* >= 0: cap every UE except this KPM RAN UE ID; -1: cap the congestor only */
++  int edge_slice_id;
++  int nssai_sst;
++  long nssai_sd; /* -1 = SST only */
++} cc_cfg_t;
++
++static cc_cfg_t cfg;
++
++static void cfg_str(cJSON* j, const char* k, char* dst, size_t n, const char* def)
++{
++  cJSON* v = cJSON_GetObjectItem(j, k);
++  snprintf(dst, n, "%s", cJSON_IsString(v) ? v->valuestring : def);
++}
++
++static double cfg_num(cJSON* j, const char* k, double def)
++{
++  cJSON* v = cJSON_GetObjectItem(j, k);
++  return cJSON_IsNumber(v) ? v->valuedouble : def;
++}
++
++static int load_cfg(const char* path)
++{
++  FILE* f = fopen(path, "rb");
++  if (!f) {
++    fprintf(stderr, "[CC] cannot open config %s\n", path);
++    return -1;
++  }
++  char buf[16384];
++  size_t n = fread(buf, 1, sizeof(buf) - 1, f);
++  fclose(f);
++  buf[n] = 0;
++  cJSON* j = cJSON_Parse(buf);
++  if (!j) {
++    fprintf(stderr, "[CC] invalid JSON in %s\n", path);
++    return -1;
++  }
++  cfg_str(j, "mode", cfg.mode, sizeof(cfg.mode), "collect");
++  cfg_str(j, "policy", cfg.policy, sizeof(cfg.policy), "ml");
++  cfg.threshold_cell_prb = cfg_num(j, "threshold_cell_prb", 80.0);
++  cfg.min_duration_samples = (int)cfg_num(j, "min_duration_samples", 1);
++  cfg_str(j, "model_path", cfg.model_path, sizeof(cfg.model_path), "/tmp/dualbrain/model.onnx");
++  cfg_str(j, "preprocess_path", cfg.preprocess_path, sizeof(cfg.preprocess_path), "/tmp/dualbrain/preprocess.json");
++  cfg_str(j, "events_path", cfg.events_path, sizeof(cfg.events_path), "/tmp/dualbrain/events.jsonl");
++  cfg_str(j, "raw_dump_path", cfg.raw_dump_path, sizeof(cfg.raw_dump_path), "");
++  cfg_str(j, "aux_metric", cfg.aux_metric, sizeof(cfg.aux_metric), "");
++  char dir[8];
++  cfg_str(j, "direction", dir, sizeof(dir), "dl");
++  cfg_str(j, "metric", cfg.metric, sizeof(cfg.metric), strcmp(dir, "ul") == 0 ? "RRU.PrbTotUl" : "RRU.PrbTotDl");
++  cfg_str(j, "positive_label", cfg.positive_label, sizeof(cfg.positive_label), "1");
++  cfg_str(j, "edge_policy", cfg.edge_policy, sizeof(cfg.edge_policy), "lowest_prb_share");
++  cfg.kpm_period_ms = (int)cfg_num(j, "kpm_period_ms", 100);
++  cfg.window = (int)cfg_num(j, "window_samples", 10);
++  cfg.prob_threshold = cfg_num(j, "prob_threshold", 0.5);
++  cfg.trigger_consecutive = (int)cfg_num(j, "trigger_consecutive", 2);
++  cfg.release_after_normal = (int)cfg_num(j, "release_after_normal_samples", 50);
++  cfg.min_hold_samples = (int)cfg_num(j, "min_hold_samples", 50);
++  cfg.lease_s = cfg_num(j, "lease_s", 0);
++  cfg.lease_samples = cfg.lease_s > 0 ? (int)ceil(cfg.lease_s * 1000.0 / (cfg.kpm_period_ms > 0 ? cfg.kpm_period_ms : 100)) : 0;
++  /* While reserved, the cap itself holds cell PRB near (100 - reserve_pct)%, which
++   * looks "normal" to the model. Release only when load is really gone. */
++  cfg.release_below_cell_prb = cfg_num(j, "release_below_cell_prb", 60.0);
++  cfg.reserve_pct = (int)cfg_num(j, "reserve_pct", 20);
++  cfg.edge_window = (int)cfg_num(j, "edge_window_samples", 100);
++  /* The UE that dominated the last congestor_window samples is the one capped. */
++  cfg.congestor_window = (int)cfg_num(j, "congestor_window_samples", 5);
++  cfg.be_slice_id = (int)cfg_num(j, "best_effort_slice_id", 1);
++  /* R1: the protected (cell-edge) UE by E2SM-KPM RAN UE ID. With two heavy UEs, capping
++   * only the heaviest lets the other absorb the freed PRBs; capping every UE except the
++   * protected one into the same slice caps them *together* (one shared quota). */
++  cfg.protected_ue_ref = (long long)cfg_num(j, "protected_ue_ref", -1);
++  cfg.edge_slice_id = (int)cfg_num(j, "edge_slice_id", 2);
++  cfg.nssai_sst = (int)cfg_num(j, "nssai_sst", 1);
++  char sd[16];
++  cfg_str(j, "nssai_sd", sd, sizeof(sd), "000001");
++  cfg.nssai_sd = sd[0] ? strtol(sd, NULL, 16) : -1;
++  cJSON_Delete(j);
++  if (cfg.window < 2 || cfg.window > MAX_WINDOW || cfg.reserve_pct < 1 || cfg.reserve_pct > 99) {
++    fprintf(stderr, "[CC] config: window_samples in [2,%d], reserve_pct in [1,99]\n", MAX_WINDOW);
++    return -1;
++  }
++  return 0;
++}
++
++/* ------------------------------------------------------------------ state */
++
++typedef struct {
++  uint64_t ref;   /* RAN UE ID from KPM (gNB-CU UE ID) */
++  double last;    /* last per-UE PRB share, % */
++  double ema;     /* long average share (reporting) */
++  double recent;  /* short average share: who is congesting the cell right now */
++  int64_t seen_us;
++  int used;
++} ue_t;
++
++static struct {
++  pthread_mutex_t mtx;
++  ue_t ue[MAX_UES];
++  double win[MAX_WINDOW];
++  int win_len, win_pos;
++  uint64_t samples;
++  int hot_streak, normal_streak, above_streak;
++  int reserved;
++  int extended; /* past the lease minimum hold, kept while hot */
++  int armed;        /* trigger armed (dualbrain11: disarmed by a lease release, cc_rearm_step) */
++  int below_streak; /* samples with cell PRB < threshold_cell_prb while disarmed */
++  uint64_t reserved_at;
++  uint64_t edge_ref;
++  uint32_t assoc_sig; /* UE set signature at last ASSOC */
++  int pending;        /* 1 reserve, 2 release, 3 re-assoc */
++} st = {.mtx = PTHREAD_MUTEX_INITIALIZER, .armed = 1};
++
++static cc_model_t* model;
++static int pos_idx = -1;
++static FILE* events;
++static global_e2_node_id_t node_id;
++static _Atomic int have_node;
++
++static void emit(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
++static void emit(const char* fmt, ...)
++{
++  if (!events)
++    return;
++  va_list ap;
++  va_start(ap, fmt);
++  vfprintf(events, fmt, ap);
++  va_end(ap);
++  fputc('\n', events);
++  fflush(events);
++}
++
++static ue_t* ue_get(uint64_t ref)
++{
++  ue_t* free_slot = NULL;
++  for (int i = 0; i < MAX_UES; i++) {
++    if (st.ue[i].used && st.ue[i].ref == ref)
++      return &st.ue[i];
++    if (!st.ue[i].used && !free_slot)
++      free_slot = &st.ue[i];
++  }
++  if (free_slot) {
++    memset(free_slot, 0, sizeof(*free_slot));
++    free_slot->used = 1;
++    free_slot->ref = ref;
++  }
++  return free_slot;
++}
++
++/* UEs reported within the last 2 s. */
++static int ue_active(ue_t const* u, int64_t now) { return u->used && now - u->seen_us < 2000000; }
++
++static uint32_t ue_signature(int64_t now)
++{
++  uint32_t h = 2166136261u;
++  for (int i = 0; i < MAX_UES; i++)
++    if (ue_active(&st.ue[i], now))
++      h = (h ^ (uint32_t)st.ue[i].ref) * 16777619u;
++  return h;
++}
++
++/* The congestor = the UE with the highest recent PRB share. It is the only UE
++ * capped; every other UE (the "edge users") keeps the reserved floor. A long
++ * average is wrong here: at a burst's start the bursting UE has been idle, so
++ * its long average is the lowest of all. */
++static int pick_congestor(int64_t now, uint64_t* congestor)
++{
++  int n = 0;
++  double best = -1;
++  for (int i = 0; i < MAX_UES; i++) {
++    if (!ue_active(&st.ue[i], now))
++      continue;
++    n++;
++    if (st.ue[i].recent > best) {
++      best = st.ue[i].recent;
++      *congestor = st.ue[i].ref;
++    }
++  }
++  return n >= 2 ? 0 : -1;
++}
++
++/* ------------------------------------------------------------------ KPM */
++
++static int ba_eq(byte_array_t ba, const char* s)
++{
++  size_t n = strlen(s);
++  return ba.len == n && memcmp(ba.buf, s, n) == 0;
++}
++
++static int ue_ref_of(ue_id_e2sm_t const* id, uint64_t* ref)
++{
++  if (id->type == GNB_UE_ID_E2SM && id->gnb.ran_ue_id) {
++    *ref = *id->gnb.ran_ue_id;
++    return 0;
++  }
++  if (id->type == GNB_DU_UE_ID_E2SM && id->gnb_du.ran_ue_id) {
++    *ref = *id->gnb_du.ran_ue_id;
++    return 0;
++  }
++  if (id->type == GNB_UE_ID_E2SM) { /* fall back to AMF UE NGAP ID */
++    *ref = id->gnb.amf_ue_ngap_id;
++    return 0;
++  }
++  return -1;
++}
++
++static int metric_value(kpm_ind_msg_format_1_t const* m, double* v)
++{
++  if (m->meas_data_lst_len == 0)
++    return -1;
++  meas_data_lst_t const* d = &m->meas_data_lst[0];
++  for (size_t i = 0; i < m->meas_info_lst_len && i < d->meas_record_len; i++) {
++    meas_type_t const* t = &m->meas_info_lst[i].meas_type;
++    if (t->type != NAME_MEAS_TYPE || !ba_eq(t->name, cfg.metric))
++      continue;
++    meas_record_lst_t const* r = &d->meas_record_lst[i];
++    if (r->value == INTEGER_MEAS_VALUE)
++      *v = (double)r->int_val;
++    else if (r->value == REAL_MEAS_VALUE)
++      *v = r->real_val;
++    else
++      return -1;
++    return 0;
++  }
++  return -1;
++}
++
++static void on_sample(double cell, int64_t now)
++{
++  st.win[st.win_pos] = cell;
++  st.win_pos = (st.win_pos + 1) % cfg.window;
++  if (st.win_len < cfg.window)
++    st.win_len++;
++  st.samples++;
++
++  char ues[1024];
++  size_t o = 0;
++  ues[0] = 0;
++  for (int i = 0; i < MAX_UES; i++)
++    if (ue_active(&st.ue[i], now) && o < sizeof(ues) - 48)
++      o += (size_t)snprintf(ues + o, sizeof(ues) - o, "%s\"%llu\":%.1f", o ? "," : "",
++                            (unsigned long long)st.ue[i].ref, st.ue[i].last);
++
++  if (st.win_len < cfg.window) {
++    emit("{\"t_us\":%lld,\"type\":\"sample\",\"cell_prb\":%.2f,\"ues\":{%s},\"warmup\":true}", (long long)now, cell, ues);
++    return;
++  }
++  double ordered[MAX_WINDOW], feat[CC_N_WINDOW_FEATURES];
++  for (int i = 0; i < cfg.window; i++)
++    ordered[i] = st.win[(st.win_pos + i) % cfg.window];
++  cc_window_features(ordered, (size_t)cfg.window, (double)cfg.kpm_period_ms, feat);
++
++  int threshold_policy = strcmp(cfg.mode, "control") == 0 && strcmp(cfg.policy, "threshold") == 0;
++  if (!model && !threshold_policy) {
++    emit("{\"t_us\":%lld,\"type\":\"sample\",\"cell_prb\":%.2f,\"ues\":{%s},"
++         "\"features\":{\"prb_mean\":%.4f,\"prb_std\":%.4f,\"prb_min\":%.4f,\"prb_slope\":%.5f,"
++         "\"max_prb\":%.4f,\"slope_prb\":%.5f,\"last_prb\":%.4f}}",
++         (long long)now, cell, ues, feat[0], feat[1], feat[2], feat[3], feat[7], feat[8], feat[9]);
++    return;
++  }
++
++  /* Model input in the order the model expects (preprocess.json features). */
++  double raw[CC_MAX_FEATURES];
++  for (size_t k = 0; model && k < cc_model_n_features(model); k++) {
++    raw[k] = NAN;
++    for (int w = 0; w < CC_N_WINDOW_FEATURES; w++)
++      if (strcmp(cc_model_feature_name(model, k), cc_window_feature_names[w]) == 0)
++        raw[k] = feat[w];
++  }
++  double proba[8] = {0}, lat_us = 0, p;
++  int idx = -1, hot;
++  char err[256];
++  if (threshold_policy) { /* baseline: reactive threshold on the current cell utilization */
++    hot = cc_threshold_hot(&st.above_streak, cell, cfg.threshold_cell_prb, cfg.min_duration_samples);
++    p = hot ? 1.0 : 0.0;
++  } else {
++    if (cc_model_predict(model, raw, &idx, proba, &lat_us, err, sizeof(err)) != 0) {
++      fprintf(stderr, "[CC] predict: %s\n", err);
++      return;
++    }
++    p = proba[pos_idx];
++    hot = p >= cfg.prob_threshold;
++  }
++  st.hot_streak = hot ? st.hot_streak + 1 : 0;
++  int calm = !hot && (!st.reserved || cell < cfg.release_below_cell_prb);
++  st.normal_streak = calm ? st.normal_streak + 1 : 0;
++
++  emit("{\"t_us\":%lld,\"type\":\"sample\",\"cell_prb\":%.2f,\"ues\":{%s},"
++       "\"features\":{\"prb_mean\":%.4f,\"prb_std\":%.4f,\"prb_min\":%.4f,\"prb_slope\":%.5f,"
++       "\"max_prb\":%.4f,\"slope_prb\":%.5f,\"last_prb\":%.4f},"
++       "\"prob\":%.4f,\"pred\":%d,\"latency_us\":%.1f,\"reserved\":%s,\"armed\":%s,\"policy\":\"%s\"}",
++       (long long)now, cell, ues, feat[0], feat[1], feat[2], feat[3], feat[7], feat[8], feat[9], p, hot, lat_us,
++       st.reserved ? "true" : "false", st.armed ? "true" : "false", threshold_policy ? "threshold" : "ml");
++
++  if (cfg.lease_samples > 0 && !st.reserved
++      && cc_rearm_step(&st.armed, &st.below_streak, cell, cfg.threshold_cell_prb, cfg.min_duration_samples))
++    emit("{\"t_us\":%lld,\"type\":\"control\",\"action\":\"rearm\",\"cell_prb\":%.2f}", (long long)now, cell);
++  if (strcmp(cfg.mode, "control") != 0 || st.pending)
++    return;
++  if (!st.reserved && st.armed && cc_should_trigger(threshold_policy, st.hot_streak, cfg.trigger_consecutive)) {
++    uint64_t congestor = 0;
++    if (pick_congestor(now, &congestor) == 0) {
++      st.edge_ref = congestor; /* field reused: the capped UE */
++      st.pending = 1;
++    } else if (st.hot_streak == (threshold_policy ? 1 : cfg.trigger_consecutive)) {
++      emit("{\"t_us\":%lld,\"type\":\"control\",\"action\":\"skip\",\"reason\":\"need >= 2 active UEs\"}", (long long)now);
++    }
++  } else if (st.reserved && cfg.lease_samples > 0) {
++    unsigned long long start = st.reserved_at;
++    int a = cc_lease_step(st.samples, &start, cfg.lease_samples, hot);
++    st.reserved_at = start;
++    if (a == CC_LEASE_RELEASE)
++      st.pending = 2;
++    else if (a == CC_LEASE_RENEW && !st.extended) {
++      st.extended = 1; /* one event when the minimum hold is over and the cap stays because the policy is hot */
++      emit("{\"t_us\":%lld,\"type\":\"control\",\"action\":\"extend\",\"lease_s\":%.1f}", (long long)now, cfg.lease_s);
++    }
++    else if (ue_signature(now) != st.assoc_sig)
++      st.pending = 3; /* a UE joined/left while reserved: re-associate */
++  } else if (st.reserved && st.normal_streak >= cfg.release_after_normal
++             && st.samples - st.reserved_at >= (uint64_t)cfg.min_hold_samples) {
++    st.pending = 2;
++  } else if (st.reserved && ue_signature(now) != st.assoc_sig) {
++    st.pending = 3; /* a UE joined/left while reserved: re-associate */
++  }
++}
++
++/* Debug: one JSON line per KPM indication, values exactly as decoded (no scaling,
++ * no rounding): header, every UE report's identifiers, every measurement record of
++ * every meas_data entry (record type + raw int/real), and which known UEs are absent. */
++static FILE* raw_dump;
++static void dump_raw(kpm_ind_data_t const* ind, int64_t now)
++{
++  if (!raw_dump)
++    return;
++  kpm_ind_msg_format_3_t const* f3 = &ind->msg.frm_3;
++  fprintf(raw_dump, "{\"t_us\":%lld,\"hdr_type\":%d,\"collectStartTime\":%llu,\"edge_ref\":%llu,\"reserved\":%d,"
++          "\"n_ue_reports\":%zu,\"ues\":[",
++          (long long)now, (int)ind->hdr.type,
++          ind->hdr.type == FORMAT_1_INDICATION_HEADER ? (unsigned long long)ind->hdr.kpm_ric_ind_hdr_format_1.collectStartTime : 0ULL,
++          (unsigned long long)st.edge_ref, st.reserved, f3->ue_meas_report_lst_len);
++  uint64_t seen[MAX_UES];
++  size_t nseen = 0;
++  for (size_t i = 0; i < f3->ue_meas_report_lst_len; i++) {
++    ue_id_e2sm_t const* id = &f3->meas_report_per_ue[i].ue_meas_report_lst;
++    kpm_ind_msg_format_1_t const* m = &f3->meas_report_per_ue[i].ind_msg_format_1;
++    uint64_t ref = 0;
++    int ok = ue_ref_of(id, &ref) == 0;
++    if (ok && nseen < MAX_UES)
++      seen[nseen++] = ref;
++    fprintf(raw_dump, "%s{\"id_type\":%d", i ? "," : "", (int)id->type);
++    if (id->type == GNB_UE_ID_E2SM)
++      fprintf(raw_dump, ",\"amf_ue_ngap_id\":%llu,\"ran_ue_id\":%s%llu%s", (unsigned long long)id->gnb.amf_ue_ngap_id,
++              id->gnb.ran_ue_id ? "" : "null,\"_x\":", id->gnb.ran_ue_id ? (unsigned long long)*id->gnb.ran_ue_id : 0ULL, "");
++    else if (id->type == GNB_DU_UE_ID_E2SM)
++      fprintf(raw_dump, ",\"gnb_cu_ue_f1ap\":%u,\"ran_ue_id\":%s%llu", id->gnb_du.gnb_cu_ue_f1ap,
++              id->gnb_du.ran_ue_id ? "" : "null,\"_x\":", id->gnb_du.ran_ue_id ? (unsigned long long)*id->gnb_du.ran_ue_id : 0ULL);
++    fprintf(raw_dump, ",\"xapp_ref\":%s%llu,\"meas_info_len\":%zu,\"meas_data_len\":%zu,\"data\":[", ok ? "" : "null,\"_y\":",
++            (unsigned long long)ref, m->meas_info_lst_len, m->meas_data_lst_len);
++    for (size_t d = 0; d < m->meas_data_lst_len; d++) {
++      meas_data_lst_t const* md = &m->meas_data_lst[d];
++      fprintf(raw_dump, "%s{\"incomplete\":%s,\"records\":[", d ? "," : "",
++              md->incomplete_flag ? "true" : "false");
++      for (size_t k = 0; k < md->meas_record_len; k++) {
++        meas_record_lst_t const* rec = &md->meas_record_lst[k];
++        char name[64] = "?";
++        if (k < m->meas_info_lst_len && m->meas_info_lst[k].meas_type.type == NAME_MEAS_TYPE) {
++          size_t n = m->meas_info_lst[k].meas_type.name.len;
++          n = n < sizeof(name) - 1 ? n : sizeof(name) - 1;
++          memcpy(name, m->meas_info_lst[k].meas_type.name.buf, n);
++          name[n] = 0;
++        }
++        if (rec->value == INTEGER_MEAS_VALUE)
++          fprintf(raw_dump, "%s{\"name\":\"%s\",\"type\":\"INTEGER\",\"int_val\":%u}", k ? "," : "", name, rec->int_val);
++        else if (rec->value == REAL_MEAS_VALUE)
++          fprintf(raw_dump, "%s{\"name\":\"%s\",\"type\":\"REAL\",\"real_val\":%.17g}", k ? "," : "", name, rec->real_val);
++        else
++          fprintf(raw_dump, "%s{\"name\":\"%s\",\"type\":\"NO_VALUE(%d)\"}", k ? "," : "", name, (int)rec->value);
++      }
++      fprintf(raw_dump, "]}");
++    }
++    fprintf(raw_dump, "]}");
++  }
++  fprintf(raw_dump, "],\"known_absent\":[");
++  int first = 1;
++  for (int i = 0; i < MAX_UES; i++) {
++    if (!st.ue[i].used)
++      continue;
++    int found = 0;
++    for (size_t k = 0; k < nseen; k++)
++      found |= seen[k] == st.ue[i].ref;
++    if (!found) {
++      fprintf(raw_dump, "%s%llu", first ? "" : ",", (unsigned long long)st.ue[i].ref);
++      first = 0;
++    }
++  }
++  fprintf(raw_dump, "]}\n");
++  fflush(raw_dump);
++}
++
++static void sm_cb_kpm(sm_ag_if_rd_t const* rd)
++{
++  assert(rd->type == INDICATION_MSG_AGENT_IF_ANS_V0);
++  kpm_ind_data_t const* ind = &rd->ind.kpm.ind;
++  if (ind->msg.type != FORMAT_3_INDICATION_MESSAGE)
++    return;
++  kpm_ind_msg_format_3_t const* f3 = &ind->msg.frm_3;
++  int64_t now = time_now_us();
++  pthread_mutex_lock(&st.mtx);
++  dump_raw(ind, now);
++  double cell = 0;
++  int n = 0;
++  for (size_t i = 0; i < f3->ue_meas_report_lst_len; i++) {
++    uint64_t ref;
++    double v;
++    if (ue_ref_of(&f3->meas_report_per_ue[i].ue_meas_report_lst, &ref) != 0
++        || metric_value(&f3->meas_report_per_ue[i].ind_msg_format_1, &v) != 0)
++      continue;
++    ue_t* u = ue_get(ref);
++    if (!u)
++      continue;
++    double a = 1.0 / (double)cfg.edge_window;
++    double r = 2.0 / ((double)cfg.congestor_window + 1.0);
++    u->ema = u->seen_us ? (1 - a) * u->ema + a * v : v;
++    u->recent = u->seen_us ? (1 - r) * u->recent + r * v : v;
++    u->last = v;
++    u->seen_us = now;
++    cell += v;
++    n++;
++  }
++  if (n > 0)
++    on_sample(cell > 100 ? 100 : cell, now);
++  pthread_mutex_unlock(&st.mtx);
++}
++
++static test_info_lst_t nssai_filter(void)
++{
++  test_info_lst_t dst = {0};
++  dst.test_cond_type = S_NSSAI_TEST_COND_TYPE;
++  dst.S_NSSAI = TRUE_TEST_COND_TYPE;
++  dst.test_cond = ecalloc(1, sizeof(test_cond_e));
++  *dst.test_cond = EQUAL_TEST_COND;
++  dst.test_cond_value = ecalloc(1, sizeof(test_cond_value_t));
++  dst.test_cond_value->type = OCTET_STRING_TEST_COND_VALUE;
++  dst.test_cond_value->octet_string_value = ecalloc(1, sizeof(byte_array_t));
++  size_t len = cfg.nssai_sd >= 0 ? 4 : 1;
++  dst.test_cond_value->octet_string_value->len = len;
++  uint8_t* b = ecalloc(len, 1);
++  b[0] = (uint8_t)cfg.nssai_sst;
++  if (cfg.nssai_sd >= 0) {
++    b[1] = (cfg.nssai_sd >> 16) & 0xff;
++    b[2] = (cfg.nssai_sd >> 8) & 0xff;
++    b[3] = cfg.nssai_sd & 0xff;
++  }
++  dst.test_cond_value->octet_string_value->buf = b;
++  return dst;
++}
++
++static int build_kpm_sub(kpm_ran_function_def_t const* rf, kpm_sub_data_t* sub)
++{
++  ric_report_style_item_t const* style4 = NULL;
++  for (size_t i = 0; i < rf->sz_ric_report_style_list; i++)
++    if (rf->ric_report_style_list[i].report_style_type == STYLE_4_RIC_SERVICE_REPORT)
++      style4 = &rf->ric_report_style_list[i];
++  if (!style4) {
++    fprintf(stderr, "[CC] gNB offers no KPM report style 4 (per-UE)\n");
++    return -1;
++  }
++  int has_metric = 0;
++  for (size_t i = 0; i < style4->meas_info_for_action_lst_len; i++)
++    if (ba_eq(style4->meas_info_for_action_lst[i].name, cfg.metric))
++      has_metric = 1;
++  if (!has_metric) {
++    fprintf(stderr, "[CC] gNB does not offer %s in KPM style 4\n", cfg.metric);
++    return -1;
++  }
++  memset(sub, 0, sizeof(*sub));
++  sub->ev_trg_def.type = FORMAT_1_RIC_EVENT_TRIGGER;
++  sub->ev_trg_def.kpm_ric_event_trigger_format_1.report_period_ms = (uint32_t)cfg.kpm_period_ms;
++  sub->sz_ad = 1;
++  sub->ad = ecalloc(1, sizeof(kpm_act_def_t));
++  kpm_act_def_t* ad = sub->ad;
++  ad->type = FORMAT_4_ACTION_DEFINITION;
++  ad->frm_4.matching_cond_lst_len = 1;
++  ad->frm_4.matching_cond_lst = ecalloc(1, sizeof(matching_condition_format_4_lst_t));
++  ad->frm_4.matching_cond_lst[0].test_info_lst = nssai_filter();
++  kpm_act_def_format_1_t* f1 = &ad->frm_4.action_def_format_1;
++  int aux = 0;
++  for (size_t i = 0; cfg.aux_metric[0] && i < style4->meas_info_for_action_lst_len; i++)
++    aux |= ba_eq(style4->meas_info_for_action_lst[i].name, cfg.aux_metric);
++  if (cfg.aux_metric[0] && !aux)
++    fprintf(stderr, "[CC] gNB does not offer aux metric %s; subscribing to %s only\n", cfg.aux_metric, cfg.metric);
++  f1->meas_info_lst_len = 1 + (size_t)aux;
++  f1->meas_info_lst = ecalloc(f1->meas_info_lst_len, sizeof(meas_info_format_1_lst_t));
++  for (size_t i = 0; i < f1->meas_info_lst_len; i++) {
++    f1->meas_info_lst[i].meas_type.type = NAME_MEAS_TYPE;
++    f1->meas_info_lst[i].meas_type.name = cp_str_to_ba(i == 0 ? cfg.metric : cfg.aux_metric);
++    f1->meas_info_lst[i].label_info_lst_len = 1;
++    f1->meas_info_lst[i].label_info_lst = ecalloc(1, sizeof(label_info_lst_t));
++    f1->meas_info_lst[i].label_info_lst[0].noLabel = ecalloc(1, sizeof(enum_value_e));
++    *f1->meas_info_lst[i].label_info_lst[0].noLabel = TRUE_ENUM_VALUE;
++  }
++  f1->gran_period_ms = (uint32_t)cfg.kpm_period_ms;
++  f1->cell_global_id = NULL;
++#if defined KPM_V2_03 || defined KPM_V3_00
++  f1->meas_bin_range_info_lst_len = 0;
++  f1->meas_bin_info_lst = NULL;
++#endif
++  return 0;
++}
++
++/* ------------------------------------------------------------------ SLICE control */
++
++static char* dup_n(const char* s, uint32_t* len)
++{
++  *len = (uint32_t)strlen(s);
++  char* d = malloc(*len);
++  memcpy(d, s, *len);
++  return d;
++}
++
++static void fill_slice(fr_slice_t* s, uint32_t id, const char* label, int pct)
++{
++  s->id = id;
++  s->label = dup_n(label, &s->len_label);
++  s->sched = dup_n("PF", &s->len_sched);
++  s->params.type = SLICE_ALG_SM_V0_STATIC;
++  /* Harmony gNB convention: pos_low..pos_high = share of the DL BWP in percent. */
++  s->params.u.sta.pos_low = 0;
++  s->params.u.sta.pos_high = (uint32_t)pct - 1;
++}
++
++static void send_ctrl(slice_ctrl_req_data_t* req)
++{
++  control_sm_xapp_api(&node_id, SM_SLICE_ID, req);
++  free_slice_ctrl_msg(&req->msg);
++}
++
++static void ctrl_reserve(void)
++{
++  slice_ctrl_req_data_t add = {0};
++  add.msg.type = SLICE_CTRL_SM_V0_ADD;
++  ul_dl_slice_conf_t* dl = &add.msg.u.add_mod_slice.dl;
++  dl->sched_name = dup_n("PF", &dl->len_sched_name);
++  /* A reservation is a floor for the edge UE, not a cap: only the other UEs are
++   * capped (best-effort = 100 - reserve_pct %); the edge UE stays unassociated
++   * (uncapped) and always finds >= reserve_pct % of the PRBs free. */
++  dl->len_slices = 1;
++  dl->slices = ecalloc(1, sizeof(fr_slice_t));
++  fill_slice(&dl->slices[0], (uint32_t)cfg.be_slice_id, "best-effort", 100 - cfg.reserve_pct);
++  ul_dl_slice_conf_t* ul = &add.msg.u.add_mod_slice.ul;
++  ul->sched_name = dup_n("PF", &ul->len_sched_name);
++  send_ctrl(&add);
++}
++
++static void ctrl_assoc(int64_t now)
++{
++  slice_ctrl_req_data_t req = {0};
++  req.msg.type = SLICE_CTRL_SM_V0_UE_SLICE_ASSOC;
++  ue_slice_conf_t* a = &req.msg.u.ue_slice;
++  a->ues = ecalloc(MAX_UES, sizeof(ue_slice_assoc_t));
++  char list[512];
++  size_t o = 0;
++  list[0] = 0;
++  for (int i = 0; i < MAX_UES; i++) {
++    if (!ue_active(&st.ue[i], now) || st.ue[i].ref > 0xffff)
++      continue;
++    if (!cc_capped(st.ue[i].ref, st.edge_ref, cfg.protected_ue_ref))
++      continue; /* protected UEs stay unassociated (uncapped, scheduled first) */
++    ue_slice_assoc_t* u = &a->ues[a->len_ue_slice++];
++    u->rnti = (uint16_t)st.ue[i].ref; /* Harmony gNB resolves RAN UE ID → RNTI */
++    u->dl_id = (uint32_t)cfg.be_slice_id;
++    u->ul_id = u->dl_id;
++    if (o < sizeof(list) - 32)
++      o += (size_t)snprintf(list + o, sizeof(list) - o, "%s\"%llu\":%u", o ? "," : "",
++                            (unsigned long long)st.ue[i].ref, u->dl_id);
++  }
++  st.assoc_sig = ue_signature(now);
++  send_ctrl(&req);
++  emit("{\"t_us\":%lld,\"type\":\"control\",\"action\":\"assoc\",\"ues\":{%s}}", (long long)now, list);
++}
++
++static void ctrl_release(void)
++{
++  slice_ctrl_req_data_t del = {0};
++  del.msg.type = SLICE_CTRL_SM_V0_DEL;
++  del.msg.u.del_slice.len_dl = 2;
++  del.msg.u.del_slice.dl = ecalloc(2, sizeof(uint32_t));
++  del.msg.u.del_slice.dl[0] = (uint32_t)cfg.be_slice_id;
++  del.msg.u.del_slice.dl[1] = (uint32_t)cfg.edge_slice_id;
++  send_ctrl(&del);
++}
++
++/* Control runs here, never inside the KPM callback. */
++static void control_step(void)
++{
++  pthread_mutex_lock(&st.mtx);
++  int action = st.pending;
++  int64_t now = time_now_us();
++  if (!action || !have_node) {
++    pthread_mutex_unlock(&st.mtx);
++    return;
++  }
++  if (action == 1) {
++    ctrl_reserve();
++    ctrl_assoc(now);
++    st.reserved = 1;
++    st.extended = 0;
++    st.reserved_at = st.samples;
++    st.normal_streak = 0;
++    char prot[256];
++    size_t o = 0;
++    uint64_t first_protected = 0;
++    prot[0] = 0;
++    for (int i = 0; i < MAX_UES; i++)
++      if (ue_active(&st.ue[i], now) && o < sizeof(prot) - 24 && !cc_capped(st.ue[i].ref, st.edge_ref, cfg.protected_ue_ref)) {
++        if (!o)
++          first_protected = st.ue[i].ref;
++        o += (size_t)snprintf(prot + o, sizeof(prot) - o, "%s%llu", o ? "," : "", (unsigned long long)st.ue[i].ref);
++      }
++    emit("{\"t_us\":%lld,\"type\":\"control\",\"action\":\"reserve\",\"cap\":\"%s\",\"congestor_ue\":%llu,\"protected_ues\":[%s],"
++         "\"edge_ue\":%llu,\"reserve_pct\":%d,\"best_effort_pct\":%d,\"direction\":\"%s\"}",
++         (long long)now, cfg.protected_ue_ref >= 0 ? "all_but_protected" : "congestor",
++         (unsigned long long)st.edge_ref, prot, (unsigned long long)first_protected, cfg.reserve_pct,
++         100 - cfg.reserve_pct, strstr(cfg.metric, "Ul") ? "ul" : "dl");
++    if (cfg.protected_ue_ref >= 0)
++      printf("[CC] RESERVE: cap all UEs except %lld together at %d%%, protect [%s] (>= %d%%)\n",
++             cfg.protected_ue_ref, 100 - cfg.reserve_pct, prot, cfg.reserve_pct);
++    else
++      printf("[CC] RESERVE: cap UE %llu at %d%%, protect [%s] (>= %d%%)\n", (unsigned long long)st.edge_ref,
++             100 - cfg.reserve_pct, prot, cfg.reserve_pct);
++  } else if (action == 2) {
++    ctrl_release();
++    st.reserved = 0;
++    if (cfg.lease_samples > 0) { /* R1 lease path: re-arm only after the cell has been below threshold (cc_policy.h) */
++      st.armed = 0;
++      st.below_streak = 0;
++    }
++    emit("{\"t_us\":%lld,\"type\":\"control\",\"action\":\"release\",\"congestor_ue\":%llu}", (long long)now,
++         (unsigned long long)st.edge_ref);
++    printf("[CC] RELEASE reservation\n");
++  } else if (action == 3) {
++    ctrl_assoc(now);
++  }
++  st.pending = 0;
++  pthread_mutex_unlock(&st.mtx);
++}
++
++static _Atomic int stop;
++static void on_signal(int s)
++{
++  (void)s;
++  stop = 1;
++}
++
++int main(int argc, char* argv[])
++{
++  const char* cfg_path = getenv("XAPP_CC_CONFIG");
++  if (!cfg_path || !*cfg_path)
++    cfg_path = "/tmp/dualbrain/config.json";
++  if (load_cfg(cfg_path) != 0)
++    return 1;
++  if (cfg.raw_dump_path[0] && !(raw_dump = fopen(cfg.raw_dump_path, "a")))
++    fprintf(stderr, "[CC] cannot open raw dump %s\n", cfg.raw_dump_path);
++  events = fopen(cfg.events_path, "a");
++  if (!events) {
++    fprintf(stderr, "[CC] cannot open events file %s\n", cfg.events_path);
++    return 1;
++  }
++  if (strcmp(cfg.mode, "control") == 0 && strcmp(cfg.policy, "threshold") != 0) {
++    char err[512];
++    model = cc_model_load(cfg.model_path, cfg.preprocess_path, err, sizeof(err));
++    if (!model) {
++      fprintf(stderr, "[CC] model: %s\n", err);
++      return 1;
++    }
++    pos_idx = cc_model_class_index(model, cfg.positive_label);
++    if (pos_idx < 0) {
++      fprintf(stderr, "[CC] positive_label %s not among model classes\n", cfg.positive_label);
++      return 1;
++    }
++  }
++  emit("{\"t_us\":%lld,\"type\":\"start\",\"mode\":\"%s\",\"policy\":\"%s\",\"metric\":\"%s\",\"window\":%d,"
++       "\"period_ms\":%d,\"reserve_pct\":%d,\"prob_threshold\":%.3f,\"threshold_cell_prb\":%.1f,\"min_duration_samples\":%d,"
++       "\"trigger_consecutive\":%d,\"lease_s\":%.1f,\"lease_samples\":%d,\"model\":\"%s\"}",
++       (long long)time_now_us(), cfg.mode, cfg.policy, cfg.metric, cfg.window, cfg.kpm_period_ms, cfg.reserve_pct,
++       cfg.prob_threshold, cfg.threshold_cell_prb, cfg.min_duration_samples, cfg.trigger_consecutive, cfg.lease_s,
++       cfg.lease_samples,
++       model ? cfg.model_path : "");
++
++  fr_args_t args = init_fr_args(argc, argv);
++  init_xapp_api(&args);
++  sleep(1);
++  e2_node_arr_xapp_t nodes = e2_nodes_xapp_api();
++  defer({ free_e2_node_arr_xapp(&nodes); });
++  if (nodes.len == 0) {
++    fprintf(stderr, "[CC] no E2 node connected to the RIC\n");
++    return 1;
++  }
++
++  /* Newest KPM-capable node first: after a gNB restart FlexRIC can still list the
++   * dead association before the live one (same node ID). */
++  sm_ans_xapp_t h = {0};
++  for (size_t ii = nodes.len; ii-- > 0 && !h.success;) {
++    e2_node_connected_xapp_t* n = &nodes.n[ii];
++    for (size_t j = 0; j < n->len_rf; j++) {
++      if (n->rf[j].id != KPM_RAN_FUNC_ID || n->rf[j].defn.type != KPM_RAN_FUNC_DEF_E)
++        continue;
++      kpm_sub_data_t sub;
++      if (build_kpm_sub(&n->rf[j].defn.kpm, &sub) != 0)
++        return 1;
++      h = report_sm_xapp_api(&n->id, KPM_RAN_FUNC_ID, &sub, sm_cb_kpm);
++      free_kpm_sub_data(&sub);
++      if (h.success) {
++        node_id = cp_global_e2_node_id(&n->id);
++        have_node = 1;
++      }
++      break;
++    }
++  }
++  if (!h.success) {
++    fprintf(stderr, "[CC] KPM subscription failed\n");
++    return 1;
++  }
++  if (strcmp(cfg.mode, "control") == 0) {
++    /* Clean slate: drop a reservation left behind by a killed predecessor. */
++    pthread_mutex_lock(&st.mtx);
++    ctrl_release();
++    pthread_mutex_unlock(&st.mtx);
++  }
++  printf("[CC] mode=%s metric=%s period=%dms window=%d — running\n", cfg.mode, cfg.metric, cfg.kpm_period_ms,
++         cfg.window);
++
++  signal(SIGINT, on_signal);
++  signal(SIGTERM, on_signal);
++  const char* dur = getenv("XAPP_DURATION");
++  int64_t deadline = (dur && atoi(dur) > 0) ? time_now_us() + (int64_t)atoi(dur) * 1000000 : 0;
++  while (!stop && (!deadline || time_now_us() < deadline)) {
++    control_step();
++    usleep(10000);
++  }
++  pthread_mutex_lock(&st.mtx);
++  if (st.reserved) { /* never leave a reservation behind */
++    ctrl_release();
++    emit("{\"t_us\":%lld,\"type\":\"control\",\"action\":\"release\",\"reason\":\"xapp_stop\"}", (long long)time_now_us());
++  }
++  pthread_mutex_unlock(&st.mtx);
++  rm_report_sm_xapp_api(h.u.handle);
++  while (try_stop_xapp_api() == false)
++    usleep(1000);
++  cc_model_free(model);
++  emit("{\"t_us\":%lld,\"type\":\"stop\"}", (long long)time_now_us());
++  fclose(events);
++  return 0;
++}

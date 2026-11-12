@@ -1,0 +1,13 @@
+# r1/mlengine venv (r1/.venv-mlengine): wrapper server + FLAML backend. Exact versions: requirements.lock
+fastapi
+uvicorn
+python-multipart
+httpx
+numpy<2
+pandas
+scikit-learn
+flaml[automl]
+onnx
+onnxruntime
+skl2onnx
+onnxmltools

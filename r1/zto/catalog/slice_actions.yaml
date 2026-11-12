@@ -1,0 +1,65 @@
+# PRB-reservation actions the congestion xApp actually implements (grounding catalogue for the
+# ZTO-Agent prompt and the verification gate). Replaces the brief's rc_actions.yaml: this control is
+# FlexRIC SLICE SM, NOT E2SM-RC — there is no RC style / action id / RAN parameter id in this path.
+#
+# Sources (verified 2026-11-02, see r1/docs/aura3.md):
+#   SM id 145 ........ openair2/E2AP/flexric/src/sm/slice_sm/slice_sm_id.h (SM_SLICE_ID)
+#   gNB handler ...... openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_slice.c (Harmony patch 0002)
+#   xApp ............. flexric/examples/xApp/c/dual_brain/xapp_congestion_ctrl.c (ctrl_reserve /
+#                      ctrl_assoc / ctrl_release), selection: cc_assoc.h (cc_capped)
+#   scheduler ........ NR MAC DL, patches 0001/0004: a slice's quota is shared by all its UEs;
+#                      unassociated UEs are allocated first.
+
+service_model:
+  name: SLICE
+  sm_id: 145
+  e2sm_rc: false
+  direction: dl            # AURA caps the DL scheduler only; UL reservations are not supported
+
+actions:
+  - id: reserve_prb_for_protected_ue
+    description: >-
+      Cap every UE except the protected UE, together, to (100 - reserve_pct) % of the DL PRBs, so the
+      protected UE always finds at least reserve_pct % free.
+    params:                                                      # bounds: zto/spec.schema.json (slice_action)
+      reserve_pct: {unit: percent of DL PRBs}                    # kept free for the protected UE
+      target: {protected_ue: "the cell-edge UE (UE3) keeps the reserved share",
+               center_ues: "UE1/UE2 keep it (inverts the R1 intents)"}
+    protected_ue: UE3 (cell-edge, protected); its KPM RAN UE ID is resolved at run start, never by the agent
+    messages:                                                    # sent in this order on reserve
+      - op: ADD
+        type: SLICE_CTRL_SM_V0_ADD
+        slice:
+          id: 1                                                  # best_effort_slice_id
+          label: best-effort
+          algorithm: SLICE_ALG_SM_V0_STATIC
+          pos_low: 0
+          pos_high: "100 - reserve_pct - 1"                      # gNB: share = pos_high - pos_low + 1 % of DL BWP
+      - op: ASSOC
+        type: SLICE_CTRL_SM_V0_UE_SLICE_ASSOC
+        ues: all_except_protected                               # one message, every active UE but the protected one
+        ue_id: e2sm_kpm_ran_ue_id                                # = gNB-CU UE ID; gNB re-resolves the RNTI every 200 slots
+        dl_id: 1
+        ul_id: 1
+    release:
+      - op: DEL
+        type: SLICE_CTRL_SM_V0_DEL
+        dl_slice_ids: [1]
+    xapp_config:                                                 # keys the rendered xApp config must carry
+      reserve_pct: reserve_pct
+      best_effort_slice_id: 1
+      protected_ue_ref: kpm_ran_ue_id(UE3)                       # runtime; -1 = legacy MILCOM: cap the congestor only
+
+# Verification gate, intent read-back (gate/readback.py): fixed template, no LLM.
+readback:
+  # Exact semantics (mechanism check 2026-11-03): strict priority, not a 20/80 partition. The
+  # scheduler serves the unassociated protected UE first; all other UEs share at most cap_pct %.
+  # Always report the center-UE throughput cost next to the protected UE's gain.
+  template: >-
+    {protected_label} is served first and guaranteed ≥{reserve_pct}% of DL PRBs; all other UEs share
+    at most {cap_pct}%.
+  fields:
+    protected_label: "UE3 (protected)"     # never the IMSI: this sentence can end up in the paper
+    cap_pct: "100 - reserve_pct"
+  example: >-
+    UE3 (protected) is served first and guaranteed ≥20% of DL PRBs; all other UEs share at most 80%.

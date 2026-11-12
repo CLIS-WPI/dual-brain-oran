@@ -1,0 +1,110 @@
+{{- if .Values.mysql.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-mysql-init
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+data:
+  oai_db.sql: |
+{{ .Files.Get "files/oai_db.sql" | indent 4 }}
+---
+# Alias Service name "mysql" — baked into UDR/UDM images (database.host: mysql).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  selector:
+    app.kubernetes.io/component: mysql
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-mysql
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  selector:
+    app.kubernetes.io/component: mysql
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-mysql
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: mysql
+      harmony.telecom/tenant: {{ .Values.tenant.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: mysql
+        harmony.telecom/tenant: {{ .Values.tenant.name }}
+    spec:
+      containers:
+        - name: mysql
+          image: "{{ .Values.mysql.image.registry }}/{{ .Values.mysql.image.repository }}:{{ .Values.mysql.image.tag }}"
+          imagePullPolicy: {{ .Values.mysql.image.pullPolicy }}
+          env:
+            - name: MYSQL_DATABASE
+              value: {{ .Values.mysql.database | quote }}
+            - name: MYSQL_USER
+              value: {{ .Values.mysql.user | quote }}
+            - name: MYSQL_PASSWORD
+              value: {{ .Values.mysql.password | quote }}
+            - name: MYSQL_ROOT_PASSWORD
+              value: {{ .Values.mysql.rootPassword | quote }}
+          ports:
+            - containerPort: 3306
+              name: mysql
+          volumeMounts:
+            - name: mysql-init
+              mountPath: /docker-entrypoint-initdb.d
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p{{ .Values.mysql.rootPassword }}"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p{{ .Values.mysql.rootPassword }}"]
+            initialDelaySeconds: 40
+            periodSeconds: 15
+      volumes:
+        - name: mysql-init
+          configMap:
+            name: {{ include "oai-5g-core.fullname" . }}-mysql-init
+        - name: mysql-data
+          emptyDir: {}
+{{- end }}

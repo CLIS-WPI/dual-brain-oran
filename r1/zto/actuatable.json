@@ -1,0 +1,15 @@
+{
+  "_note": "What the deployed xApp can actually do (gate check 0, deterministic). xapp_congestion_ctrl.c reads protected_ue_ref (resolved from the testbed: UE3) and acts on cell PRB >= threshold; it never reads target or op. Any spec value outside these sets \u2192 FAIL \"not actuatable\" (target \"unspecified\" \u2192 HOLD \"beneficiary not stated\").",
+  "label_rule.op": [
+    ">="
+  ],
+  "slice_action.target": [
+    "protected_ue"
+  ],
+  "slice_action.action": [
+    "reserve_prb_for_protected_ue"
+  ],
+  "label_rule.feature": [
+    "cell_prb_util"
+  ]
+}

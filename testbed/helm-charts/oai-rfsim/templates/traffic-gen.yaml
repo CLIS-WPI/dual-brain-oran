@@ -1,0 +1,64 @@
+{{- if .Values.trafficGen.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oai-rfsim.fullname" . }}-trf
+  labels:
+    {{- include "oai-rfsim.labels" . | nindent 4 }}
+    app.kubernetes.io/component: traffic-gen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: traffic-gen
+      harmony.telecom/tenant: {{ .Values.tenant.name }}
+      {{- with $.Values.experiment.slug }}
+      harmony.telecom/experiment: {{ . | quote }}
+      {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: traffic-gen
+        harmony.telecom/tenant: {{ .Values.tenant.name }}
+        {{- with $.Values.experiment.slug }}
+        harmony.telecom/experiment: {{ . | quote }}
+        {{- end }}
+        harmony.telecom/ran-scope: {{ $.Values.experiment.slug | default "shared" | quote }}
+    spec:
+      containers:
+        - name: iperf3
+          image: "{{ .Values.images.trafficGen.registry }}/{{ .Values.images.trafficGen.repository }}:{{ .Values.images.trafficGen.tag }}"
+          # OAI images ship legacy iperf (v2), not iperf3.
+          # TCP + UDP listeners: RFsim PDU path carries reliable Mbps on UDP UL;
+          # TCP often connects then stalls under CCE/MCS0 pressure.
+          command:
+            - /bin/sh
+            - -c
+            - >
+              iperf -s -p {{ .Values.trafficGen.port }} >/tmp/iperf_tcp.log 2>&1 &
+              exec iperf -s -u -p {{ .Values.trafficGen.port }}
+          ports:
+            - {name: iperf-tcp, containerPort: {{ .Values.trafficGen.port }}, protocol: TCP}
+            - {name: iperf-udp, containerPort: {{ .Values.trafficGen.port }}, protocol: UDP}
+          resources:
+            {{- toYaml .Values.trafficGen.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oai-rfsim.fullname" . }}-trf
+  labels:
+    {{- include "oai-rfsim.labels" . | nindent 4 }}
+    app.kubernetes.io/component: traffic-gen
+spec:
+  selector:
+    app.kubernetes.io/component: traffic-gen
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+    {{- with $.Values.experiment.slug }}
+    harmony.telecom/experiment: {{ . | quote }}
+    {{- end }}
+    harmony.telecom/ran-scope: {{ $.Values.experiment.slug | default "shared" | quote }}
+  ports:
+    - {name: iperf-tcp, port: {{ .Values.trafficGen.port }}, targetPort: {{ .Values.trafficGen.port }}, protocol: TCP}
+    - {name: iperf-udp, port: {{ .Values.trafficGen.port }}, targetPort: {{ .Values.trafficGen.port }}, protocol: UDP}
+{{- end }}

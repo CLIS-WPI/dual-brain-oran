@@ -1,0 +1,65 @@
+{{- if .Values.telemetry.fluentbit.amf.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-fluentbit-amf-config
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        1
+        Log_Level    info
+
+    [INPUT]
+        Name         tail
+        Path         /var/log/oai/amf/*.log
+        Tag          amf.telemetry
+        Parser       json
+
+    [FILTER]
+        Name         record_modifier
+        Match        amf.telemetry
+        Record       tenant {{ .Values.tenant.name }}
+        Record       nf     amf
+
+    [OUTPUT]
+        Name         kafka
+        Match        amf.telemetry
+        Brokers      {{ .Values.telemetry.kafka.brokers }}
+        Topics       {{ include "oai-5g-core.kafkaTopic" . }}
+        Format       json
+{{- end }}
+---
+{{- if .Values.telemetry.fluentbit.upf.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-fluentbit-upf-config
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        1
+        Log_Level    info
+
+    [INPUT]
+        Name         tail
+        Path         /var/log/oai/upf/*.log
+        Tag          upf.telemetry
+        Parser       json
+
+    [FILTER]
+        Name         record_modifier
+        Match        upf.telemetry
+        Record       tenant {{ .Values.tenant.name }}
+        Record       nf     upf
+
+    [OUTPUT]
+        Name         kafka
+        Match        upf.telemetry
+        Brokers      {{ .Values.telemetry.kafka.brokers }}
+        Topics       {{ include "oai-5g-core.kafkaTopic" . }}
+        Format       json
+{{- end }}

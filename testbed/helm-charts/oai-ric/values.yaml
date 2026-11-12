@@ -1,0 +1,43 @@
+# Default values for oai-ric. The Harmony backend / Operator overrides
+# tenant.name per-tenant. Built from Harmony/flexric via
+# flexric/docker/Dockerfile.flexric.ubuntu.
+
+# Per-experiment RAN (set by the Operator from an OaiExperiment); empty = legacy names.
+experiment:
+  slug: ""
+
+tenant:
+  name: tenant-a
+  owner: unassigned
+
+image:
+  registry: localhost/harmony
+  repository: flexric
+  tag: latest
+  pullPolicy: IfNotPresent
+
+ric:
+  replicas: 1
+  # E2 (gNB <-> RIC) and E42 (RIC <-> xApps) SCTP ports.
+  e2Port: 36421
+  e42Port: 36422
+  config:
+    # Placeholder replaced at container start with the pod IP (Downward API).
+    # Must NOT be 127.0.0.1 — gNB E2 connects via Service/CNI to the pod IP.
+    # In-pod xApps also use this address for E42 (POD_IP works from inside the pod).
+    nearRicIp: "__POD_IP__"
+    xappDbDir: "/tmp/"
+  # Per-UE KPM (report style 4) only returns UEs whose PDU-session S-NSSAI matches.
+  # Must equal the UEs' slice (oai-rfsim ue sst/sd; lab default SST 1 / SD 000001).
+  # Empty sd = SST-only filter, which OAI treats as "no SD" (0xffffff).
+  kpm:
+    nssaiSst: "1"
+    nssaiSd: "000001"
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi

@@ -1,0 +1,54 @@
+diff --git a/openair2/E2AP/flexric/src/agent/asio_agent.c b/openair2/E2AP/flexric/src/agent/asio_agent.c
+index 3770d29e..6c6ac9d8 100644
+--- a/openair2/E2AP/flexric/src/agent/asio_agent.c
++++ b/openair2/E2AP/flexric/src/agent/asio_agent.c
+@@ -75,6 +75,22 @@ void add_fd_asio_agent(asio_agent_t* io, int fd)
+   assert(rc != -1);
+ }
+ 
++// HARMONY: level-triggered registration for the E2 SCTP socket. event_asio_agent()
++// returns one fd per call (maxevents = 1) and the loop reads one SCTP message per
++// event; with EPOLLET a message that arrived together with another one (e.g. a
++// subscription request followed by a control) never gets its own edge and stays
++// queued until the next arrival, so every later message is handled one behind.
++void add_fd_level_asio_agent(asio_agent_t* io, int fd)
++{
++  assert(io != NULL);
++  const int op = EPOLL_CTL_ADD;
++  const epoll_data_t e_data = {.fd = fd};
++  const int e_events = EPOLLIN; // level triggered: epoll keeps reporting the fd while data is queued
++  struct epoll_event event = {.events = e_events, .data = e_data};
++  int rc = epoll_ctl(io->efd, op, fd, &event);
++  assert(rc != -1);
++}
++
+ void rm_fd_asio_agent(asio_agent_t* io, int fd)
+ {
+   assert(io != NULL);
+diff --git a/openair2/E2AP/flexric/src/agent/asio_agent.h b/openair2/E2AP/flexric/src/agent/asio_agent.h
+index 85e50eeb..991c5838 100644
+--- a/openair2/E2AP/flexric/src/agent/asio_agent.h
++++ b/openair2/E2AP/flexric/src/agent/asio_agent.h
+@@ -23,6 +23,8 @@ void init_asio_agent(asio_agent_t* io);
+ 
+ void add_fd_asio_agent(asio_agent_t* io, int fd);
+ 
++void add_fd_level_asio_agent(asio_agent_t* io, int fd);
++
+ void rm_fd_asio_agent(asio_agent_t* io, int fd);
+ 
+ int create_timer_ms_asio_agent(asio_agent_t* io, long initial_ms, long interval_ms);
+diff --git a/openair2/E2AP/flexric/src/agent/e2_agent.c b/openair2/E2AP/flexric/src/agent/e2_agent.c
+index 5d0542d0..28029fe9 100644
+--- a/openair2/E2AP/flexric/src/agent/e2_agent.c
++++ b/openair2/E2AP/flexric/src/agent/e2_agent.c
+@@ -429,7 +429,8 @@ e2_agent_t* e2_init_agent(const char* addr, int port, global_e2_node_id_t ge2nid
+ 
+   init_asio_agent(&ag->io); 
+ 
+-  add_fd_asio_agent(&ag->io, ag->ep.base.fd);
++  add_fd_level_asio_agent(&ag->io, ag->ep.base.fd); // HARMONY: see asio_agent.c
++  printf("[E2 AGENT] HARMONY: E2 SCTP socket is level-triggered (no one-message-behind)\n");
+ 
+   init_ap(&ag->ap.base.type);
+ 

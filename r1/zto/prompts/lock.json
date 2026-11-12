@@ -1,0 +1,10 @@
+{
+  "_note": "Frozen ZTO-Agent system prompts (Exp-02 ablation). agent.py refuses to run if its prompt hash differs (catalogue/defaults/prompt edits change it). Snapshots: prompts/full.txt, prompts/sparse.txt, prompts/judge.txt (gate read-back). They differ only in the field instruction (diff full.txt sparse.txt).",
+  "frozen_at_commit": "8a0c7cad36590b83950d579bc94add5477c3194c",
+  "sha256": {
+    "full": "e3907967c7006e6b6f1d25b5fe05f28a860d013180ead70cc754fa2ce90efc95",
+    "sparse": "9ede72cacc38a1ba17ae52e34f36284e9f8313b9b68fca00200eb6c6b5a903df",
+    "judge": "7db4d2a75587fc75b26218b22d98f18543803739ad0b37d8a0fab4e0d81b5b77"
+  },
+  "_status": "final: frozen 2026-11-04 after exp01-select set the final defaults (T_s 500 ms, H 2.5 s), before Exp-02"
+}

@@ -1,0 +1,126 @@
+{{- if .Values.upf.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-upf
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: upf
+spec:
+  replicas: {{ .Values.upf.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: upf
+      harmony.telecom/tenant: {{ .Values.tenant.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: upf
+        harmony.telecom/tenant: {{ .Values.tenant.name }}
+      annotations:
+        {{- include "oai-5g-core.rolloutAnnotation" . | nindent 8 }}
+        {{- if .Values.upf.sriov.enabled }}
+        # Attach the SR-IOV VF on the Intel X710-DA4 for zero-latency GTP-U
+        # data-plane traffic, bypassing the default CNI (Multus CNI required).
+        k8s.v1.cni.cncf.io/networks: {{ .Values.upf.sriov.networkAttachmentDefinition }}
+        {{- end }}
+    spec:
+      {{- if .Values.upf.sriov.enabled }}
+      nodeSelector:
+        network.sriov/intel-x710: "true"
+      {{- end }}
+      containers:
+        - name: upf
+          # Either the vanilla upstream UPF image, or the custom image built
+          # from oai-telco-stack/docker/custom-upf (adds a GTP-U stats
+          # exporter that feeds the fluent-bit sidecar below). Toggle via
+          # upf.customImage.enabled.
+          image: {{ include "oai-5g-core.upfImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # custom-upf ENTRYPOINT replaces upstream CMD; pass UPF via its
+          # bpf-mount entrypoint so GTP-U can start.
+          args:
+            - /openair-upf/bin/entrypoint.sh
+            - /openair-upf/bin/oai_upf
+            - -c
+            - /openair-upf/etc/config.yaml
+            - -o
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"] # required for DPDK/GTP-U tunnel management
+            privileged: true # iptables MASQUERADE for N6 SNAT of UE pool
+          # Persist N6 SNAT across restarts (UE 12.1.1.0/24 → eth0 pod IP).
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo 1 > /proc/sys/net/ipv4/ip_forward
+                    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                      iptables -t nat -C POSTROUTING -s 12.1.1.0/24 -o eth0 -j MASQUERADE 2>/dev/null \
+                        || iptables -t nat -A POSTROUTING -s 12.1.1.0/24 -o eth0 -j MASQUERADE 2>/dev/null \
+                        || true
+                      sleep 2
+                    done
+          env:
+            - name: SMF_HOST
+              value: "{{ include "oai-5g-core.fullname" . }}-smf"
+            - name: MCC
+              value: {{ .Values.plmn.mcc | quote }}
+            - name: MNC
+              value: {{ .Values.plmn.mnc | quote }}
+          ports:
+            - containerPort: 8805
+              name: pfcp
+              protocol: UDP
+            - containerPort: 2152
+              name: gtpu
+              protocol: UDP
+          volumeMounts:
+            - name: upf-stats
+              mountPath: /var/log/oai/upf
+          {{- /* UPF carries user-plane traffic: optional own sizing (upf.resources). */}}
+          {{- $upfRes := .Values.upf.resources | default .Values.resources }}
+          resources:
+            {{- if .Values.upf.sriov.enabled }}
+            requests:
+              cpu: {{ $upfRes.requests.cpu }}
+              memory: {{ $upfRes.requests.memory }}
+              intel.com/intel_sriov_x710: "1"
+            limits:
+              cpu: {{ $upfRes.limits.cpu }}
+              memory: {{ $upfRes.limits.memory }}
+              intel.com/intel_sriov_x710: "1"
+            {{- else }}
+            {{- toYaml $upfRes | nindent 12 }}
+            {{- end }}
+
+        {{- if .Values.telemetry.fluentbit.upf.enabled }}
+        # Streams GTP-U throughput/PDU-session stats to Kafka. Expects
+        # /var/log/oai/upf/*.log (either from the base image's own logging or
+        # from the exporter baked into the custom-upf image) to contain
+        # JSON-formatted stat lines.
+        - name: fluent-bit
+          image: "{{ .Values.telemetry.fluentbit.image }}"
+          volumeMounts:
+            - name: upf-stats
+              mountPath: /var/log/oai/upf
+              readOnly: true
+            - name: fluentbit-upf-config
+              mountPath: /fluent-bit/etc
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+        {{- end }}
+
+      volumes:
+        - name: upf-stats
+          emptyDir: {}
+        {{- if .Values.telemetry.fluentbit.upf.enabled }}
+        - name: fluentbit-upf-config
+          configMap:
+            name: {{ include "oai-5g-core.fullname" . }}-fluentbit-upf-config
+        {{- end }}
+{{- end }}

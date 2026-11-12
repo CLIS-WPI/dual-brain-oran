@@ -1,0 +1,19 @@
+{
+  "_note": "Field classes (design decision 2026-11-03). operator: what an operator intent can state; the only fields the judge extracts. engineering: set by the system; the final spec must carry the defaults.json value (gate check engineering_default). slice_action.action: the single catalogue action (check 0).",
+  "operator": [
+    "slice_action.target",
+    "label_rule.op",
+    "label_rule.threshold_pct",
+    "label_rule.min_duration_s",
+    "slice_action.reserve_pct",
+    "horizon_ms"
+  ],
+  "engineering": [
+    "sampling_ms",
+    "window_ms",
+    "control.debounce_n",
+    "collection_min",
+    "model.latency_budget_ms",
+    "model.max_size_kb"
+  ]
+}

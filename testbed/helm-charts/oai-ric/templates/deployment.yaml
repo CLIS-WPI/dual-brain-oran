@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oai-ric.fullname" . }}
+  labels:
+    {{- include "oai-ric.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ric
+spec:
+  replicas: {{ .Values.ric.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: ric
+      harmony.telecom/tenant: {{ .Values.tenant.name }}
+      {{- with $.Values.experiment.slug }}
+      harmony.telecom/experiment: {{ . | quote }}
+      {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: ric
+        harmony.telecom/tenant: {{ .Values.tenant.name }}
+        {{- with $.Values.experiment.slug }}
+        harmony.telecom/experiment: {{ . | quote }}
+        {{- end }}
+        harmony.telecom/ran-scope: {{ $.Values.experiment.slug | default "shared" | quote }}
+    spec:
+      containers:
+        - name: nearrt-ric
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # FlexRIC binds E2/E42 to NEAR_RIC_IP. Render pod IP so gNB can
+          # reach the RIC over the cluster network (127.0.0.1 only works for
+          # co-located processes, not cross-pod E2).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              POD_IP="${POD_IP:?POD_IP is required}"
+              mkdir -p /usr/local/etc/flexric
+              sed "s/__POD_IP__/${POD_IP}/g" /config-template/flexric.conf > /usr/local/etc/flexric/flexric.conf
+              cp /usr/local/etc/flexric/flexric.conf /tmp/flexric.conf
+              echo "[oai-ric] NEAR_RIC_IP=$(grep NEAR_RIC_IP /usr/local/etc/flexric/flexric.conf)"
+              # Upstream nearRT-RIC's built-in stdout listener writes every MAC/RLC/PDCP/
+              # SLICE/GTP indication to ./log.txt (cwd /) — 487 GB in 2 days on the lab.
+              ln -sf /dev/null /log.txt
+              exec stdbuf -o0 nearRT-RIC -c /usr/local/etc/flexric/flexric.conf
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # Inherited by xApps started via kubectl exec (xapp_kpm_moni HARMONY_PATCH).
+            - name: KPM_NSSAI_SST
+              value: {{ .Values.ric.kpm.nssaiSst | quote }}
+            - name: KPM_NSSAI_SD
+              value: {{ .Values.ric.kpm.nssaiSd | quote }}
+          ports:
+            - name: e2-sctp
+              containerPort: {{ .Values.ric.e2Port }}
+              protocol: SCTP
+            - name: e42-sctp
+              containerPort: {{ .Values.ric.e42Port }}
+              protocol: SCTP
+          volumeMounts:
+            - name: ric-config
+              mountPath: /config-template
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: ric-config
+          configMap:
+            name: {{ include "oai-ric.fullname" . }}-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oai-ric.fullname" . }}
+  labels:
+    {{- include "oai-ric.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ric
+spec:
+  # Headless: SCTP E2/E42 must hit the pod IP directly. ClusterIP+kube-proxy
+  # DNAT is unreliable for FlexRIC's SCTP client (gNB asserts on connect).
+  clusterIP: None
+  selector:
+    app.kubernetes.io/component: ric
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+    {{- with $.Values.experiment.slug }}
+    harmony.telecom/experiment: {{ . | quote }}
+    {{- end }}
+    harmony.telecom/ran-scope: {{ $.Values.experiment.slug | default "shared" | quote }}
+  ports:
+    - name: e2-sctp
+      port: {{ .Values.ric.e2Port }}
+      targetPort: e2-sctp
+      protocol: SCTP
+    - name: e42-sctp
+      port: {{ .Values.ric.e42Port }}
+      targetPort: e42-sctp
+      protocol: SCTP

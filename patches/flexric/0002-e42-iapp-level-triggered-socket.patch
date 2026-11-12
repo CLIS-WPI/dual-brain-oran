@@ -1,0 +1,55 @@
+diff --git a/src/ric/iApp/asio_iapp.c b/src/ric/iApp/asio_iapp.c
+index 56da17b..8bc7153 100644
+--- a/src/ric/iApp/asio_iapp.c
++++ b/src/ric/iApp/asio_iapp.c
+@@ -82,6 +82,23 @@ void add_fd_asio_iapp(asio_iapp_t* io, int fd)
+ 
+ }
+ 
++// HARMONY: level-triggered registration for the E42 SCTP socket (one socket serves all
++// xApps). event_asio_iapp() returns one fd per call (maxevents = 1) and the loop reads
++// one message per event; with EPOLLET, messages that arrived together stay queued until
++// the next arrival. Under xApp churn the backlog was later processed for xApps that had
++// already gone (duplicate disconnect handling) and nearRT-RIC segfaulted (2026-10-11).
++// Same defect and fix as the gNB-side agent (oai-patches/0003).
++void add_fd_level_asio_iapp(asio_iapp_t* io, int fd)
++{
++  assert(io != NULL);
++  const int op = EPOLL_CTL_ADD;
++  const epoll_data_t e_data = {.fd = fd};
++  const int e_events = EPOLLIN; // level triggered: epoll keeps reporting the fd while data is queued
++  struct epoll_event event = {.events = e_events, .data = e_data};
++  int rc = epoll_ctl(io->efd, op, fd, &event);
++  assert(rc != -1);
++}
++
+ void rm_fd_asio_iapp(asio_iapp_t* io, int fd)
+ {
+   assert(io != NULL);
+diff --git a/src/ric/iApp/asio_iapp.h b/src/ric/iApp/asio_iapp.h
+index ea5fe4a..0cbcbe1 100644
+--- a/src/ric/iApp/asio_iapp.h
++++ b/src/ric/iApp/asio_iapp.h
+@@ -45,6 +45,8 @@ void init_asio_iapp(asio_iapp_t* io);
+ 
+ void add_fd_asio_iapp(asio_iapp_t* io, int fd);
+ 
++void add_fd_level_asio_iapp(asio_iapp_t* io, int fd);
++
+ void rm_fd_asio_iapp(asio_iapp_t* io, int fd);
+ 
+ int create_timer_ms_asio_iapp(asio_iapp_t* io, long initial_ms, long interval_ms);
+diff --git a/src/ric/iApp/e42_iapp.c b/src/ric/iApp/e42_iapp.c
+index 28e4d77..594373d 100644
+--- a/src/ric/iApp/e42_iapp.c
++++ b/src/ric/iApp/e42_iapp.c
+@@ -40,7 +40,8 @@ e42_iapp_t* init_e42_iapp(const char* addr, near_ric_if_t ric_if)
+ 
+   init_asio_iapp(&iapp->io); 
+ 
+-  add_fd_asio_iapp(&iapp->io, iapp->ep.base.fd);
++  add_fd_level_asio_iapp(&iapp->io, iapp->ep.base.fd); // HARMONY: see asio_iapp.c
++  printf("[iApp] HARMONY: E42 SCTP socket is level-triggered (no one-message-behind)\n");
+ 
+   assert(iapp->io.efd < 1024);
+ 

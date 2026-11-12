@@ -1,0 +1,52 @@
+{{- if .Values.upf.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-upf
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: upf
+spec:
+  selector:
+    app.kubernetes.io/component: upf
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+  ports:
+    - name: sbi
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: pfcp
+      port: 8805
+      protocol: UDP
+      targetPort: 8805
+    - name: gtpu
+      port: 2152
+      protocol: UDP
+      targetPort: 2152
+---
+# Alias used by OAI image config (nfs.upf.host: oai-upf)
+apiVersion: v1
+kind: Service
+metadata:
+  name: oai-upf
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: upf
+spec:
+  selector:
+    app.kubernetes.io/component: upf
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+  ports:
+    - name: sbi
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: pfcp
+      port: 8805
+      protocol: UDP
+      targetPort: 8805
+    - name: gtpu
+      port: 2152
+      protocol: UDP
+      targetPort: 2152
+{{- end }}

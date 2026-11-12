@@ -1,0 +1,227 @@
+{
+  "gnb": {
+    "image": "localhost/harmony/oai-gnb:2026.w27-uhd410-e2-aura3",
+    "image_id": "sha256:535e30a6f392e7ca2cd1083918f71c53002bfcbda563e716101822e41546aef1",
+    "registry_digest": null,
+    "image_created": "2026-10-05T18:36:11-04:00",
+    "oai_remote": "https://gitlab.eurecom.fr/oai/openairinterface5g.git",
+    "oai_base_commit": "09c9bb998fa2f30f2df452a0a9002787280389af",
+    "flexric_submodule_commit": "ef6d722f22191eea74089966983da1f5ec1fedd4",
+    "patches": [
+      "0001-nr-mac-aura-per-slice-dl-prb-quota",
+      "0002-e2-slice-sm-programs-aura-quota",
+      "0003-flexric-agent-level-triggered-e2-socket",
+      "0004-aura-protected-first-free-trimmed-prbs-prb-ground-truth"
+    ],
+    "layers_touched": "openair2 only (NR MAC DL scheduler, E2 agent); no openair1/PHY",
+    "prb_control": "FlexRIC SLICE SM (SM id 145), STATIC slice, pos_low..pos_high = % of DL BWP; not E2SM-RC",
+    "doc": "r1/docs/aura3.md"
+  },
+  "mlengine": {
+    "_note": "r1/mlengine wrapper (POST /train, GET /jobs). venv r1/.venv-mlengine from requirements.lock; python 3.10 (system).",
+    "python": "3.10",
+    "lock_file": "r1/mlengine/requirements.lock",
+    "packages": {
+      "FLAML": "2.7.0",
+      "lightgbm": "4.7.0",
+      "xgboost": "2.1.4",
+      "scikit-learn": "1.7.2",
+      "numpy": "1.26.4",
+      "onnx": "1.23.2",
+      "onnxruntime": "1.23.2",
+      "skl2onnx": "1.20.0",
+      "onnxmltools": "1.16.0",
+      "fastapi": "0.162.0"
+    },
+    "flaml": {
+      "seed": 42,
+      "time_budget_s": "= NeuralSmith train_time_s on the same train.csv (runner passes it; both recorded)",
+      "n_jobs": 8,
+      "estimators": "FLAML defaults",
+      "metric": "FLAML default (roc_auc for binary)"
+    },
+    "neuralsmith": {
+      "service": "harmony-core/harmony-neuralsmith (localhost/harmony/neuralsmith:1.2.1-h1)",
+      "cli": "neuralsmith-cli 1.2.1",
+      "mode": "fast++",
+      "cpus": 8,
+      "seed": "42 (fixed in the service)",
+      "internal_holdout_frac": 0.05
+    }
+  },
+  "ric": {
+    "r1_image": "localhost/harmony/flexric:kpm-sd-dualbrain8",
+    "r1_image_id": "sha256:01f3e5ad601dab956fe665451c364317f3c2e084a37fa915ed29d4baab971dd7",
+    "r1_source_commit": "421e101",
+    "milcom_image": "localhost/harmony/flexric:kpm-sd-dualbrain6 (frozen baseline)",
+    "dualbrain8": "threshold policy = persistence baseline (cell PRB >= threshold sustained min_duration_samples), ML debounce trigger_consecutive; parity 60/60 (p99 0.13 ms); cc_policy_test ok"
+  },
+  "ollama": {
+    "version": "0.40.13",
+    "container": "ollama",
+    "image": "sha256:46d2fa8707cc254faa5ccdb16ac2b4e6d5cb38cd079035a24174a5141f087297",
+    "env": {
+      "OLLAMA_GPU_OVERHEAD": "0",
+      "OLLAMA_FLASH_ATTENTION": "0",
+      "OLLAMA_CONTEXT_LENGTH": "8192",
+      "OLLAMA_LOAD_TIMEOUT": "15m",
+      "OLLAMA_MAX_LOADED_MODELS": "2",
+      "OLLAMA_SCHED_SPREAD": "0",
+      "OLLAMA_NUM_PARALLEL": "1",
+      "OLLAMA_KEEP_ALIVE": "-1",
+      "CUDA_VISIBLE_DEVICES": "0",
+      "OLLAMA_HOST": "0.0.0.0:11434"
+    },
+    "gpu_device_ids": [
+      "1"
+    ],
+    "num_ctx": 8192,
+    "models": [
+      {
+        "tag": "llama3.1:8b",
+        "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e",
+        "size_bytes": 4920753328,
+        "quantization": "Q4_K_M",
+        "parameter_size": "8.0B",
+        "family": "llama",
+        "context_length_model": 131072,
+        "think": {
+          "thinking_capable": false,
+          "think": false,
+          "test": "think=false accepted (no-op); think=true rejected"
+        }
+      },
+      {
+        "tag": "qwen2.5-coder:7b",
+        "digest": "dae161e27b0e90dd1856c8bb3209201fd6736d8eb66298e75ed87571486f4364",
+        "size_bytes": 4683087561,
+        "quantization": "Q4_K_M",
+        "parameter_size": "7.6B",
+        "family": "qwen2",
+        "context_length_model": 32768,
+        "think": {
+          "thinking_capable": false,
+          "think": false,
+          "test": "think=false accepted (no-op); think=true rejected"
+        }
+      },
+      {
+        "tag": "gemma4:26b-a4b",
+        "digest": "001e5dafc3c77684c2307ebc6ab8e336e10c9b18eca52acf547d72fc83c3ca8c",
+        "size_bytes": 18731025629,
+        "quantization": "Q4_K_M",
+        "parameter_size": "25.2B",
+        "family": "gemma4",
+        "context_length_model": 262144,
+        "moe": {
+          "experts": 128,
+          "experts_used": 8
+        },
+        "think": {
+          "thinking_capable": true,
+          "think": false,
+          "test": "default thinks (123 output tokens, 369 chars thinking, eval 394 ms); think=false: 10 tokens, eval 33 ms, same JSON"
+        }
+      },
+      {
+        "tag": "llama3.3:70b",
+        "digest": "a6eb4748fd2990ad2952b2335a95a7f952d1a06119a0aa6a2df6cd052a93a3fa",
+        "size_bytes": 42520413916,
+        "quantization": "Q4_K_M",
+        "parameter_size": "70.6B",
+        "family": "llama",
+        "context_length_model": 131072,
+        "think": {
+          "thinking_capable": false,
+          "think": false,
+          "test": "think=false accepted (no-op); think=true rejected"
+        }
+      }
+    ],
+    "gpu": {
+      "index": 1,
+      "uuid": "GPU-509d8ab3-0c8e-8b98-fbf8-0c55f6ba9058",
+      "name": "NVIDIA H100 NVL",
+      "memory_total_mib": 95830,
+      "vbios": "96.00.74.00.11",
+      "driver": "580.126.09"
+    },
+    "gpu_coresident": [],
+    "residency": {
+      "single": {
+        "used_by": [
+          "Exp-06"
+        ],
+        "rule": "one model resident at a time (unload + /api/ps empty before the next)"
+      },
+      "pair": {
+        "used_by": [
+          "Exp-04",
+          "Exp-08"
+        ],
+        "rule": "orchestrator + judge (llama3.3:70b) both resident, each warmed with one call after load; gate time measured warm only",
+        "judge": "llama3.3:70b",
+        "check": "r1/env/gpu0_residency.json",
+        "fits": {
+          "llama3.1:8b": {
+            "gpu0_used_mib": 51498,
+            "gpu0_total_mib": 95830,
+            "both_full_gpu": true,
+            "warm_call_s": {
+              "llama3.3:70b": 0.25,
+              "llama3.1:8b": 0.04
+            }
+          },
+          "qwen2.5-coder:7b": {
+            "gpu0_used_mib": 50616,
+            "gpu0_total_mib": 95830,
+            "both_full_gpu": true,
+            "warm_call_s": {
+              "llama3.3:70b": 0.23,
+              "qwen2.5-coder:7b": 0.04
+            }
+          },
+          "gemma4:26b-a4b": {
+            "gpu0_used_mib": 64934,
+            "gpu0_total_mib": 95830,
+            "both_full_gpu": true,
+            "warm_call_s": {
+              "llama3.3:70b": 0.27,
+              "gemma4:26b-a4b": 2.31
+            }
+          }
+        },
+        "note": "/api/ps under-reports gemma4:26b-a4b VRAM (1.4 GiB); nvidia-smi shows ~14 GB.",
+        "orchestrator": "llama3.1:8b only (paper prototype); judge llama3.3:70b"
+      }
+    },
+    "think_policy": "all R1 calls send \"think\": false (Exp-02/04/06/08); checked 2026-11-03 on ollama 0.40.13",
+    "gpu_history": [
+      {
+        "until": "2026-11-04T15:09",
+        "index": 0,
+        "uuid": "GPU-96b18ccc-7894-5e31-0ad6-a74b5b79ac28",
+        "name": "NVIDIA H100 NVL",
+        "memory_total_mib": 95830,
+        "vbios": "96.00.74.00.11",
+        "driver": "580.126.09",
+        "used_by": [
+          "exp01 (none)",
+          "Exp-02 part a exp02-20261104-a (co-resident with another user's job)"
+        ]
+      },
+      {
+        "from": "2026-11-04T15:11",
+        "index": 1,
+        "uuid": "GPU-509d8ab3-0c8e-8b98-fbf8-0c55f6ba9058",
+        "note": "same model, VBIOS and driver as GPU0"
+      }
+    ],
+    "image_pin": {
+      "image_id": "sha256:46d2fa8707cc254faa5ccdb16ac2b4e6d5cb38cd079035a24174a5141f087297",
+      "reports": "0.40.13",
+      "compose": "<home>/Ollama/docker-compose.yml (image line pinned; up -d --force-recreate --no-deps --pull never ollama)",
+      "before": "r1/env/ollama_container_before.json (0.40.14 container, image 9911eb13), r1/env/ollama_compose_before.yml"
+    }
+  }
+}

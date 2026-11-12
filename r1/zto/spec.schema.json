@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harmony.local/r1/zto/spec.schema.json",
+  "title": "ZTO-Agent task specification (R1)",
+  "description": "The JSON task spec the ZTO-Agent must produce. Expressive: it can state what the operator asked even when the testbed cannot actuate it (op \"<=\", target center_ues, \"unspecified\"); zto/actuatable.json lists what can be deployed and gate check 0 enforces it. Every numeric bound lives in this file only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sampling_ms",
+    "window_ms",
+    "horizon_ms",
+    "collection_min",
+    "label_rule",
+    "model",
+    "slice_action"
+  ],
+  "properties": {
+    "sampling_ms": {
+      "description": "KPM report period T_s.",
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 1000
+    },
+    "window_ms": {
+      "description": "Trailing feature window W.",
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 10000
+    },
+    "horizon_ms": {
+      "description": "Prediction horizon H (label evaluated at t + H). 0 = detection.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "collection_min": {
+      "description": "Telemetry collection duration.",
+      "type": "number",
+      "minimum": 5,
+      "maximum": 60
+    },
+    "label_rule": {
+      "description": "Congestion definition (zto/catalog/label_rule.yaml): feature op threshold_pct sustained for min_duration_s. The persistence baseline applies the same rule at t.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "feature",
+        "op",
+        "threshold_pct",
+        "min_duration_s"
+      ],
+      "properties": {
+        "feature": {
+          "enum": [
+            "cell_prb_util"
+          ]
+        },
+        "op": {
+          "description": "What the operator asked; actuatable: \">=\" only (zto/actuatable.json). \"unspecified\" resolves to the default.",
+          "enum": [
+            ">=",
+            "<=",
+            "unspecified"
+          ]
+        },
+        "threshold_pct": {
+          "type": "number",
+          "minimum": 70,
+          "maximum": 90
+        },
+        "min_duration_s": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 3
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "latency_budget_ms",
+        "max_size_kb"
+      ],
+      "properties": {
+        "latency_budget_ms": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "max_size_kb": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 4096
+        }
+      }
+    },
+    "slice_action": {
+      "description": "PRB reservation via FlexRIC SLICE SM (zto/catalog/slice_actions.yaml); replaces the brief's rc_action \u2014 this control path is not E2SM-RC.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "reserve_pct",
+        "target"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "reserve_prb_for_protected_ue"
+          ]
+        },
+        "reserve_pct": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 50
+        },
+        "target": {
+          "description": "Who the operator wants protected. Actuatable: protected_ue only (the xApp always protects UE3, zto/actuatable.json). No default: \"unspecified\" \u2192 gate HOLD (beneficiary not stated).",
+          "enum": [
+            "protected_ue",
+            "center_ues",
+            "unspecified"
+          ]
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "debounce_n": {
+          "description": "ML policy acts after debounce_n consecutive positive predictions. Default ceil(1000 / sampling_ms) (~1 s), so the 1-2 s post-idle MCS spike cannot trigger it.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "_intent_id": "I2",
+  "_intent_text": "If the cell stays above 85% load for at least 5 seconds, guarantee the edge user 30% of the downlink, and see it coming about 5 seconds ahead.",
+  "$defaults": "zto/defaults.json",
+  "_note": "explicit fields only; every other field = zto/defaults.json (resolve.py). Review: Milad.",
+  "horizon_ms": 5000,
+  "label_rule": {
+    "op": ">=",
+    "threshold_pct": 85,
+    "min_duration_s": 5
+  },
+  "slice_action": {
+    "reserve_pct": 30,
+    "target": "protected_ue"
+  }
+}

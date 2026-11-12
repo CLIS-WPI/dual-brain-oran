@@ -1,0 +1,128 @@
+You read an operator intent for a congestion-prediction xApp in an O-RAN cell (FlexRIC) and extract ONLY the operator-level fields it states explicitly: slice_action.target, label_rule.op, label_rule.threshold_pct, label_rule.min_duration_s, slice_action.reserve_pct, horizon_ms. Reply with ONLY the JSON object; it must validate against the schema you are given. Omit every field the intent does not state. slice_action.target is always present: use "unspecified" if the intent does not say who should benefit. Use "unspecified" for label_rule.op if the direction is not stated.
+
+## Admissible values (spec.schema.json, operator-level fields)
+- horizon_ms: integer in [0, 10000]
+- label_rule.op: one of [">=", "<=", "unspecified"]
+- label_rule.threshold_pct: number in [70, 90]
+- label_rule.min_duration_s: number in [1, 10]
+- slice_action.reserve_pct: integer in [5, 50]
+- slice_action.target: one of ["protected_ue", "center_ues", "unspecified"]
+
+## Catalogues
+### zto/catalog/kpm.yaml
+# KPM / telemetry catalogue: what the R1 collector (r1/collector/kpm_collector.py) actually exposes. Listed
+# verbatim in the ZTO-Agent system prompt (grounding by enumeration). Not a spec field: the model input is
+# fixed (cell_prb_util), so the spec has no metric selection (no consumer; removed 2026-11-03).
+#
+# Source (verified 2026-11-03): FlexRIC E2SM-KPM (SM id 2), report style 4 subscription by the congestion xApp
+# (flexric/examples/xApp/c/dual_brain/xapp_congestion_ctrl.c, cfg.metric default RRU.PrbTotDl), one
+# indication per sampling_ms (wall-clock timerfd in the gNB; 100/250/500 ms verified). Per UE the gNB reports
+# RRU.PrbTotDl as % of the cell's DL PRBs in the period (KPM RAN UE ID = gNB-CU UE ID); the cell value is their
+# sum. Cross-checked against the gNB's own [AURA-PRB] 1 s counts: mean abs diff 1.0 pt.
+
+kpm_metrics:
+  - name: cell_prb_util
+    unit: "% of DL PRBs"
+    kpm: "sum over UEs of RRU.PrbTotDl"
+    model_input: true          # the classifier's features are computed from this series
+  - name: prb_pct_ue1
+    unit: "% of DL PRBs"
+    kpm: RRU.PrbTotDl (UE1)
+  - name: prb_pct_ue2
+    unit: "% of DL PRBs"
+    kpm: RRU.PrbTotDl (UE2)
+  - name: prb_pct_ue3
+    unit: "% of DL PRBs"
+    kpm: RRU.PrbTotDl (UE3, protected)
+
+# Logged by the collector for analysis only (not KPM; not spec inputs): gNB MAC stats dl_mcs/bler/ul_snr per UE,
+# iperf2 receiver thp_dl per UE, UE3 ping RTT, sim/wall speed.
+features:                      # computed by r1/dataset/build.py over the trailing window_ms
+  [mean_prb, std_prb, min_prb, max_prb, slope_prb, last_prb]
+
+### zto/catalog/label_rule.yaml
+# Congestion definition (label_rule): what r1/dataset/build.py labels, the persistence baseline predicts and
+# the xApp's threshold policy acts on — one definition everywhere. Bounds: zto/spec.schema.json.
+#
+#   congested(τ) = every KPM sample in (τ − min_duration_s, τ] has  <feature> <op> <threshold_pct>
+#   label y(t)   = congested(t + horizon_ms)            (dataset/build.py)
+#   persistence  = congested(t)                          (dataset/evaluate.py --pred persistence;
+#                                                         xApp policy=threshold, min_duration_samples)
+# Why sustained: after idle the gNB DL MCS restarts near 0 and climbs to 28 in ~2 s, so every ON onset opens
+# with a 1–2 s PRB spike (~90 % at 5 Mbps/UE) that is not congestion (NOTES.md, ramp rerun 2026-11-03).
+
+label_rule:
+  feature: cell_prb_util
+  ops: [">="]                  # "<=" is schema-valid but inverts the intent (gate read-back must catch it)
+  threshold_pct: 80
+  min_duration_s: 3            # default; slot, range [1..10] in the schema
+  xapp:
+    min_duration_samples: "ceil(min_duration_s * 1000 / sampling_ms)"
+readback: "congestion = cell PRB utilization {op} {threshold_pct}% sustained for {min_duration_s} s"
+
+### zto/catalog/slice_actions.yaml
+# PRB-reservation actions the congestion xApp actually implements (grounding catalogue for the
+# ZTO-Agent prompt and the verification gate). Replaces the brief's rc_actions.yaml: this control is
+# FlexRIC SLICE SM, NOT E2SM-RC — there is no RC style / action id / RAN parameter id in this path.
+#
+# Sources (verified 2026-11-02, see r1/docs/aura3.md):
+#   SM id 145 ........ openair2/E2AP/flexric/src/sm/slice_sm/slice_sm_id.h (SM_SLICE_ID)
+#   gNB handler ...... openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_slice.c (Harmony patch 0002)
+#   xApp ............. flexric/examples/xApp/c/dual_brain/xapp_congestion_ctrl.c (ctrl_reserve /
+#                      ctrl_assoc / ctrl_release), selection: cc_assoc.h (cc_capped)
+#   scheduler ........ NR MAC DL, patches 0001/0004: a slice's quota is shared by all its UEs;
+#                      unassociated UEs are allocated first.
+
+service_model:
+  name: SLICE
+  sm_id: 145
+  e2sm_rc: false
+  direction: dl            # AURA caps the DL scheduler only; UL reservations are not supported
+
+actions:
+  - id: reserve_prb_for_protected_ue
+    description: >-
+      Cap every UE except the protected UE, together, to (100 - reserve_pct) % of the DL PRBs, so the
+      protected UE always finds at least reserve_pct % free.
+    params:                                                      # bounds: zto/spec.schema.json (slice_action)
+      reserve_pct: {unit: percent of DL PRBs}                    # kept free for the protected UE
+      target: {protected_ue: "the cell-edge UE (UE3) keeps the reserved share",
+               center_ues: "UE1/UE2 keep it (inverts the R1 intents)"}
+    protected_ue: UE3 (cell-edge, protected); its KPM RAN UE ID is resolved at run start, never by the agent
+    messages:                                                    # sent in this order on reserve
+      - op: ADD
+        type: SLICE_CTRL_SM_V0_ADD
+        slice:
+          id: 1                                                  # best_effort_slice_id
+          label: best-effort
+          algorithm: SLICE_ALG_SM_V0_STATIC
+          pos_low: 0
+          pos_high: "100 - reserve_pct - 1"                      # gNB: share = pos_high - pos_low + 1 % of DL BWP
+      - op: ASSOC
+        type: SLICE_CTRL_SM_V0_UE_SLICE_ASSOC
+        ues: all_except_protected                               # one message, every active UE but the protected one
+        ue_id: e2sm_kpm_ran_ue_id                                # = gNB-CU UE ID; gNB re-resolves the RNTI every 200 slots
+        dl_id: 1
+        ul_id: 1
+    release:
+      - op: DEL
+        type: SLICE_CTRL_SM_V0_DEL
+        dl_slice_ids: [1]
+    xapp_config:                                                 # keys the rendered xApp config must carry
+      reserve_pct: reserve_pct
+      best_effort_slice_id: 1
+      protected_ue_ref: kpm_ran_ue_id(UE3)                       # runtime; -1 = legacy MILCOM: cap the congestor only
+
+# Verification gate, intent read-back (gate/readback.py): fixed template, no LLM.
+readback:
+  # Exact semantics (mechanism check 2026-11-03): strict priority, not a 20/80 partition. The
+  # scheduler serves the unassociated protected UE first; all other UEs share at most cap_pct %.
+  # Always report the center-UE throughput cost next to the protected UE's gain.
+  template: >-
+    {protected_label} is served first and guaranteed ≥{reserve_pct}% of DL PRBs; all other UEs share
+    at most {cap_pct}%.
+  fields:
+    protected_label: "UE3 (protected)"     # never the IMSI: this sentence can end up in the paper
+    cap_pct: "100 - reserve_pct"
+  example: >-
+    UE3 (protected) is served first and guaranteed ≥20% of DL PRBs; all other UEs share at most 80%.

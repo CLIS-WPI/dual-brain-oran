@@ -1,0 +1,20 @@
+apiVersion: v2
+name: oai-rfsim
+description: >-
+  Per-tenant RF-simulated experiment stack: an RFSIM gNB (no USRP/SR-IOV/
+  Multus — RF is a TCP loopback via the OAI rfsimulator), one or more
+  virtual UE pods, and a traffic-gen (iperf3) pod for UL/DL throughput
+  experiments. Decoupled from the hardware-bound oai-ran chart so RFSIM
+  experiments can run without any physical radio and without consuming the
+  USRP hardware lock.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - 5g
+  - rfsimulator
+  - virtual-ue
+  - iperf
+  - experiment
+maintainers:
+  - name: Harmony Tang Lab

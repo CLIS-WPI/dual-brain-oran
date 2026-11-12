@@ -1,0 +1,214 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oai-rfsim.fullname" . }}-gnb-config
+  labels:
+    {{- include "oai-rfsim.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gnb-rfsim
+data:
+  gnb.conf.tpl: |
+    Active_gNBs = ( "{{ .Values.gnb.gnbName }}");
+    Asn1_verbosity = "none";
+    usrp-tx-thread-config = 0;
+
+    gNBs = (
+    {
+      gNB_ID    = {{ .Values.gnb.gnbId }};
+      gNB_name  = "{{ .Values.gnb.gnbName }}";
+      # SDAP headers off: with headers on, UE treats IPv4 0x45 as QFI=5 and
+      # drops DL ("unmapped QFI=5") → oaitun RX=0 despite gNB DL goodput.
+      enable_sdap = 0;
+
+      tracking_area_code = {{ .Values.gnb.trackingAreaCode }};
+      plmn_list = ({
+        mcc = {{ .Values.plmn.mcc | int }};
+        mnc = {{ .Values.plmn.mnc | int }};
+        mnc_length = {{ .Values.plmn.mncLength }};
+        snssaiList = ({ sst = {{ .Values.gnb.sst }}; sd = {{ .Values.gnb.sd }}; });
+      });
+
+      nr_cellid = {{ .Values.gnb.nrCellId }};
+
+      pdsch_AntennaPorts_XP = 1;
+      pusch_AntennaPorts    = 1;
+      do_CSIRS              = "yes";
+      # 2026.w27 accepts none|periodic|aperiodic; "no"/integers abort config parse.
+      # RFSIM does not need SRS — leave off to avoid USRP-era quirks.
+      do_SRS                = "none";
+      min_rxtxtime          = 6;
+
+      servingCellConfigCommon = (
+      {
+        physCellId = {{ .Values.gnb.physCellId }};
+
+        absoluteFrequencySSB       = {{ .Values.gnb.absoluteFrequencySSB }};
+        dl_frequencyBand           = {{ .Values.gnb.band }};
+        dl_absoluteFrequencyPointA = {{ .Values.gnb.dlAbsoluteFrequencyPointA }};
+        dl_offstToCarrier          = 0;
+        dl_subcarrierSpacing       = 1;
+        dl_carrierBandwidth        = {{ .Values.gnb.dlCarrierBandwidth }};
+
+        initialDLBWPlocationAndBandwidth  = {{ .Values.gnb.initialDLBWPlocationAndBandwidth }};
+        initialDLBWPsubcarrierSpacing   = 1;
+        initialDLBWPcontrolResourceSetZero = {{ .Values.gnb.initialDLBWPcontrolResourceSetZero }};
+        initialDLBWPsearchSpaceZero        = 0;
+
+        ul_frequencyBand           = {{ .Values.gnb.band }};
+        ul_offstToCarrier          = 0;
+        ul_subcarrierSpacing       = 1;
+        ul_carrierBandwidth        = {{ .Values.gnb.dlCarrierBandwidth }};
+        pMax                       = 20;
+
+        initialULBWPlocationAndBandwidth = {{ .Values.gnb.initialDLBWPlocationAndBandwidth }};
+        initialULBWPsubcarrierSpacing  = 1;
+
+        prach_ConfigurationIndex     = 98;
+        prach_msg1_FDM               = 0;
+        prach_msg1_FrequencyStart    = 0;
+        zeroCorrelationZoneConfig    = 12;
+        preambleReceivedTargetPower  = -82;
+        preambleTransMax             = 7;
+        powerRampingStep             = 1;
+        ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR = 4;
+        ssb_perRACH_OccasionAndCB_PreamblesPerSSB    = 15;
+        ra_ContentionResolutionTimer = 7;
+        rsrp_ThresholdSSB            = 10;
+        prach_RootSequenceIndex_PR   = 2;
+        prach_RootSequenceIndex      = 1;
+        msg1_SubcarrierSpacing       = 1,
+        restrictedSetConfig          = 0,
+        msg3_DeltaPreamble           = 1;
+        p0_NominalWithGrant          = -70;
+
+        pucchGroupHopping            = 0;
+        hoppingId                    = 40;
+        p0_nominal                   = -70;
+
+        dmrs_TypeA_Position          = 0;
+        subcarrierSpacing            = 1;
+        ssb_PositionsInBurst_Bitmap  = 1;
+        ssb_periodicityServingCell   = 1;
+
+        referenceSubcarrierSpacing   = 1;
+        dl_UL_TransmissionPeriodicity = 5;
+        nrofDownlinkSlots            = 2;
+        nrofDownlinkSymbols          = 6;
+        nrofUplinkSlots              = 2;
+        nrofUplinkSymbols            = 4;
+
+        ssPBCH_BlockPower            = 15;
+      }
+      );
+
+      SCTP : { SCTP_INSTREAMS = 2; SCTP_OUTSTREAMS = 2; };
+
+      amf_ip_address = ({ ipv4 = "{{ include "oai-rfsim.amfHost" . }}"; active = "yes"; preference = "ipv4"; });
+
+      NETWORK_INTERFACES :
+      {
+        # OAI CI/docker-compose use bare IPs (no CIDR). Passing podIP/32 made
+        # 2024.w10 segfault in PDCP GTP init on some builds; bare IP matches
+        # https://gitlab.eurecom.fr/oai/openairinterface5g/-/tree/develop/ci-scripts/yaml_files/5g_rfsimulator
+        GNB_IPV4_ADDRESS_FOR_NG_AMF = "__POD_IP__";
+        GNB_IPV4_ADDRESS_FOR_NGU    = "__POD_IP__";
+        GNB_PORT_FOR_S1U            = 2152;
+      }
+    }
+    );
+
+    MACRLCs = (
+    {
+      num_cc              = 1;
+      tr_s_preference     = "local_L1";
+      tr_n_preference     = "local_RRC";
+      pusch_TargetSNRx10  = 200;
+      pucch_TargetSNRx10  = 200;
+      pusch_FailureThres  = 1000;
+      ul_max_mcs          = 25;
+    }
+    );
+
+    L1s = (
+    {
+      num_cc = 1;
+      tr_n_preference      = "local_mac";
+      prach_dtx_threshold  = 90;
+      max_ldpc_iterations  = 15;
+      pucch0_dtx_threshold = 80;
+    }
+    );
+
+    RUs = (
+    {
+      local_rf = "yes"
+      nb_tx    = 1;
+      nb_rx    = 1;
+      att_tx   = 0;
+      att_rx   = 0;
+      bands    = [{{ .Values.gnb.band }}];
+      max_pdschReferenceSignalPower = -27;
+      max_rxgain     = 80;
+      eNB_instances  = [0];
+    }
+    );
+
+    rfsimulator = ( { serveraddr = "server"; } );
+
+    security = {
+      ciphering_algorithms = ( "nea2", "nea0" );
+      integrity_algorithms = ( "nia2", "nia0" );
+      drb_ciphering = "yes";
+      drb_integrity = "no";
+    };
+
+    log_config : {
+      global_log_level = "info";
+      hw_log_level     = "info";
+      phy_log_level    = "info";
+      mac_log_level    = "info";
+      rlc_log_level    = "info";
+      pdcp_log_level   = "info";
+      rrc_log_level    = "info";
+      ngap_log_level   = "debug";
+      f1ap_log_level   = "debug";
+    };
+{{- if .Values.e2Agent.enabled }}
+
+    e2_agent = {
+      near_ric_ip_addr = "__RIC_IP__";
+      sm_dir = "{{ .Values.e2Agent.smDir }}";
+    };
+{{- end }}
+  render-gnb-conf.sh: |
+    #!/bin/sh
+    set -eu
+    POD_IP="${POD_IP:?POD_IP is required}"
+    POD_PREFIX="${POD_PREFIX:-32}"
+    # FlexRIC E2 agent uses inet_pton() — hostname strings assert-fail.
+    # Resolve the RIC Service/DNS name to an IPv4 address at pod start.
+    RIC_HOST="{{ include "oai-rfsim.ricHost" . }}"
+    RIC_IP=""
+    case "$RIC_HOST" in
+      [0-9]*.[0-9]*.[0-9]*.[0-9]*)
+        RIC_IP="$RIC_HOST"
+        ;;
+      *)
+        # busybox init image: prefer nslookup (getent often absent)
+        RIC_IP="$(nslookup "$RIC_HOST" 2>/dev/null | awk '/^Address: /{a=$2} END{print a}')"
+        if [ -z "${RIC_IP:-}" ] && command -v getent >/dev/null 2>&1; then
+          RIC_IP="$(getent hosts "$RIC_HOST" | awk '{print $1; exit}')"
+        fi
+        ;;
+    esac
+    if [ -z "${RIC_IP:-}" ]; then
+      echo "[render-gnb-conf] WARN: could not resolve RIC host '$RIC_HOST'; E2 disabled placeholder 127.0.0.1" >&2
+      RIC_IP="127.0.0.1"
+    else
+      echo "[render-gnb-conf] RIC host '$RIC_HOST' -> $RIC_IP"
+    fi
+    sed \
+      -e "s/__POD_IP__/${POD_IP}/g" \
+      -e "s/__POD_PREFIX__/${POD_PREFIX}/g" \
+      -e "s/__RIC_IP__/${RIC_IP}/g" \
+      /config-template/gnb.conf.tpl > /etc-oai-gnb/gnb.conf
+    echo "[render-gnb-conf] wrote /etc-oai-gnb/gnb.conf for pod ${POD_IP}/${POD_PREFIX}"

@@ -1,0 +1,24 @@
+{
+  "sampling_ms": 500,
+  "window_ms": 2000,
+  "horizon_ms": 2500,
+  "collection_min": 20,
+  "label_rule": {
+    "feature": "cell_prb_util",
+    "op": ">=",
+    "threshold_pct": 80,
+    "min_duration_s": 3
+  },
+  "model": {
+    "latency_budget_ms": 5,
+    "max_size_kb": 2048
+  },
+  "slice_action": {
+    "action": "reserve_prb_for_protected_ue",
+    "reserve_pct": 20,
+    "target": "protected_ue"
+  },
+  "control": {
+    "debounce_n": 2
+  }
+}

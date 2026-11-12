@@ -1,0 +1,15 @@
+# Overlay: official OAI --build-e2 nr-softmodem + matching FlexRIC SMs
+# on the lab UHD 4.10 ABI image. RFsim chart only — do not retag USRP.
+ARG GNB_BASE_IMAGE=localhost/harmony/oai-gnb:2026.w27-uhd410
+FROM ${GNB_BASE_IMAGE}
+USER root
+COPY nr-softmodem /opt/oai-gnb/bin/nr-softmodem
+COPY libs/ /usr/local/lib/
+COPY flexric/ /usr/local/lib/flexric/
+RUN ln -sf /usr/local/lib/liboai_usrpdevif.so /usr/local/lib/liboai_device.so 2>/dev/null || true \
+ && chmod +x /opt/oai-gnb/bin/nr-softmodem \
+ && ldconfig
+LABEL harmony.e2ap="E2AP_V3" \
+      harmony.kpm="KPM_V3_00" \
+      harmony.rfsim.e2="1"
+WORKDIR /opt/oai-gnb

@@ -1,0 +1,29 @@
+{{- range .Values.ue.instances }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oai-rfsim.fullname" $ }}-ue-{{ .name }}-config
+  labels:
+    {{- include "oai-rfsim.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: virtual-ue
+    harmony.telecom/ue: {{ .name }}
+data:
+  uicc.conf: |
+    uicc0 = {
+      imsi = "{{ .imsi }}";
+      key = "{{ .key }}";
+      opc = "{{ .opc }}";
+      amf = "8000";
+      pdu_sessions = ({ dnn = "{{ .dnn }}"; nssai_sst = {{ .sst }}; nssai_sd = {{ .sd }}; });
+    };
+    {{- with .channel }}
+    channelmod = {
+      max_chan = 2;
+      modellist = "modellist_rfsimu_1";
+      modellist_rfsimu_1 = (
+        { model_name = "rfsimu_channel_enB0"; type = "AWGN"; ploss_dB = {{ .ploss_dB | default 0 }}; noise_power_dB = {{ if hasKey . "noise_power_dB" }}{{ .noise_power_dB }}{{ else }}-50{{ end }}; forgetfact = 0; offset = 0; ds_tdl = 0; }
+      );
+    };
+    {{- end }}
+---
+{{- end }}

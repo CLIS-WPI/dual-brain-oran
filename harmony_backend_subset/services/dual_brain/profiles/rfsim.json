@@ -1,0 +1,75 @@
+{
+  "name": "rfsim",
+  "description": "OAI RFsim gNB (51 PRB, band 78) + Virtual UEs on Kubernetes",
+  "direction": "dl",
+  "ue_driver": "k8s_virtual_ue",
+  "traffic": {
+    "protocol": "udp",
+    "burst_rate": "150M",
+    "on_s": 30,
+    "off_s": 15,
+    "cycles": 6,
+    "background_rate": "1M",
+    "burst_ue": {
+      "select": "index",
+      "value": 0
+    },
+    "edge_ue": {
+      "select": "index",
+      "value": 1
+    },
+    "_calibration": "2026-10-05 (aura3): RFsim is not locked to wall time (2.5-2.9x real time on the lab host, ~10 %/s, per-minute means 2.1-3.1x), so a fixed input rate gives a drifting load (70M -> 74 % +/- 7, on 2026-10-02 70M -> 88 %). Measured on the gNB PRB ground truth: >= 100M saturates the cell at 93.2 % (sd 0.0) at any sim speed; 150M = 1.5x that point. Congestion is defined and verified on measured cell load (label.threshold_pct), the rate is only the stimulus; runs log rate, budget and sim speed (result.ground_truth)."
+  },
+  "collect": {
+    "cycles": 2,
+    "min_samples": 400
+  },
+  "label": {
+    "threshold_pct": 80,
+    "horizon_samples": 5
+  },
+  "kpm": {
+    "period_ms": 100,
+    "window_samples": 10,
+    "nssai_sst": 1,
+    "nssai_sd": "000001"
+  },
+  "control": {
+    "reserve_pct": 20,
+    "prob_threshold": 0.5,
+    "trigger_consecutive": 2,
+    "release_after_normal_samples": 50,
+    "min_hold_samples": 50,
+    "edge_policy": "lowest_prb_share",
+    "release_below_cell_prb": 60,
+    "policy": "ml",
+    "threshold_cell_prb": 80
+  },
+  "model": {
+    "latency_budget_ms": 5,
+    "min_accuracy": 0.9,
+    "max_retrain": 1,
+    "on_train_failure": "fail",
+    "reuse_last": false,
+    "_note_reuse": "on_train_failure: fail | reuse_last — on a rejected/failed training, deploy the newest stored model that passed both gates (step status 'reused', result.model_source='reused'). reuse_last: true skips training. Per run: overrides {\"model\": {...}}."
+  },
+  "ric": {
+    "workdir": "/tmp/dualbrain",
+    "xapp_binary": "/usr/local/flexric/xApp/c/dual_brain/xapp_congestion_ctrl"
+  },
+  "intent": {
+    "parser": "llm",
+    "llm_url": "http://127.0.0.1:11436/v1",
+    "llm_model": "llama3.1:8b",
+    "fallback_to_rule": true,
+    "_note": "parser: rule | llm. LLM = Docker Ollama on the GPU server (<home>/Ollama, GPU1, OLLAMA_KEEP_ALIVE=-1). Same OpenAI-compatible client as the AI chat; env DUAL_BRAIN_INTENT_PARSER / DUAL_BRAIN_LLM_URL / DUAL_BRAIN_LLM_MODEL override. fallback_to_rule: an LLM failure falls back to the rule parser, labeled 'rule'."
+  },
+  "ground_truth": {
+    "dl_prb_per_s_realtime": 61200,
+    "_note": "51 PRB x (2 DL + 1 mixed slot per 2.5 ms TDD period) x 400 periods/s; sim speed = budget / this"
+  },
+  "demo": {
+    "teardown_after_run": true,
+    "_note": "stop the congestion xApp after verify (releases the reservation); demo ops: scripts/dual_brain_demo.py"
+  }
+}

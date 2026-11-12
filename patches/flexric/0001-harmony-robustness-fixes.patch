@@ -1,0 +1,163 @@
+diff --git a/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c b/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c
+index ef292f3..0dd5de9 100644
+--- a/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c
++++ b/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c
+@@ -105,6 +105,9 @@ void sm_cb_gtp(sm_ag_if_rd_t const* rd)
+ int main(int argc, char *argv[])
+ {
+   fr_args_t args = init_fr_args(argc, argv);
++  /* HARMONY_PATCH (2026-07-08): optional PDCP monitoring — set ENABLE_PDCP_MONI=1 */
++  const char* pdcp_env = getenv("ENABLE_PDCP_MONI");
++  const bool enable_pdcp = pdcp_env != NULL && atoi(pdcp_env) > 0;
+ 
+   //Init the xApp
+   init_xapp_api(&args);
+@@ -123,7 +126,7 @@ int main(int argc, char *argv[])
+   // RLC indication
+   const char* i_1 = "1_ms";
+   sm_ans_xapp_t* rlc_handle = NULL;
+-  // PDCP indication
++  // PDCP indication (can trigger gNB-side PDCP SM assertion on some builds)
+   const char* i_2 = "1_ms";
+   sm_ans_xapp_t* pdcp_handle = NULL;
+   // GTP indication
+@@ -136,8 +139,10 @@ int main(int argc, char *argv[])
+     assert(mac_handle  != NULL);
+     rlc_handle = calloc( nodes.len, sizeof(sm_ans_xapp_t) ); 
+     assert(rlc_handle  != NULL);
+-    pdcp_handle = calloc( nodes.len, sizeof(sm_ans_xapp_t) ); 
+-    assert(pdcp_handle  != NULL);
++    if (enable_pdcp) {
++      pdcp_handle = calloc( nodes.len, sizeof(sm_ans_xapp_t) );
++      assert(pdcp_handle  != NULL);
++    }
+     gtp_handle = calloc( nodes.len, sizeof(sm_ans_xapp_t) ); 
+     assert(gtp_handle  != NULL);
+   }
+@@ -159,15 +164,19 @@ int main(int argc, char *argv[])
+       rlc_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 143, (void*)i_1, sm_cb_rlc);
+       assert(rlc_handle[i].success == true);
+ 
+-      pdcp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 144, (void*)i_2, sm_cb_pdcp);
+-      assert(pdcp_handle[i].success == true);
++      if (enable_pdcp) {
++        pdcp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 144, (void*)i_2, sm_cb_pdcp);
++        assert(pdcp_handle[i].success == true);
++      }
+ 
+       gtp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 148, (void*)i_3, sm_cb_gtp);
+       assert(gtp_handle[i].success == true);
+ 
+     } else if(n->id.type ==  ngran_gNB_CU || n->id.type ==  ngran_gNB_CUUP){
+-      pdcp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 144, (void*)i_2, sm_cb_pdcp);
+-      assert(pdcp_handle[i].success == true);
++      if (enable_pdcp) {
++        pdcp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 144, (void*)i_2, sm_cb_pdcp);
++        assert(pdcp_handle[i].success == true);
++      }
+ 
+       gtp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 148, (void*)i_3, sm_cb_gtp);
+       assert(gtp_handle[i].success == true);
+@@ -190,7 +199,7 @@ int main(int argc, char *argv[])
+       rm_report_sm_xapp_api(mac_handle[i].u.handle);
+     if(rlc_handle[i].u.handle != 0) 
+       rm_report_sm_xapp_api(rlc_handle[i].u.handle);
+-    if(pdcp_handle[i].u.handle != 0)
++    if(enable_pdcp && pdcp_handle != NULL && pdcp_handle[i].u.handle != 0)
+       rm_report_sm_xapp_api(pdcp_handle[i].u.handle);
+     if(gtp_handle[i].u.handle != 0)
+       rm_report_sm_xapp_api(gtp_handle[i].u.handle);
+@@ -199,7 +208,8 @@ int main(int argc, char *argv[])
+   if(nodes.len > 0){
+     free(mac_handle);
+     free(rlc_handle);
+-    free(pdcp_handle);
++    if (pdcp_handle != NULL)
++      free(pdcp_handle);
+     free(gtp_handle);
+   }
+ 
+diff --git a/src/agent/e2_agent.c b/src/agent/e2_agent.c
+index 74a684b..179688c 100644
+--- a/src/agent/e2_agent.c
++++ b/src/agent/e2_agent.c
+@@ -238,15 +238,19 @@ bool pend_event(e2_agent_t* ag, int fd, pending_event_t** p_ev)
+   assert(ag != NULL);
+   assert(fd > 0);
+   assert(*p_ev == NULL);
+-  
+-  assert(bi_map_size(&ag->pending) == 1 );
++
++  /* HARMONY_PATCH (2026-07-08): return false when no pending event matches fd
++   * instead of asserting — avoids gNB abort on race between SCTP and timer fds. */
++  if (bi_map_size(&ag->pending) == 0)
++    return false;
+ 
+   void* start_it = assoc_front(&ag->pending.left);
+   void* end_it = assoc_end(&ag->pending.left);
+ 
+   void* it = find_if(&ag->pending.left,start_it, end_it, &fd, eq_fd);
+ 
+-  assert(it != end_it);
++  if (it == end_it)
++    return false;
+   *p_ev = assoc_value(&ag->pending.left ,it);
+   return *p_ev != NULL;
+ }
+diff --git a/src/agent/e2_agent_api.c b/src/agent/e2_agent_api.c
+index 02a0686..c2f90c9 100644
+--- a/src/agent/e2_agent_api.c
++++ b/src/agent/e2_agent_api.c
+@@ -81,7 +81,8 @@ void init_agent_api(int mcc,
+ {
+   assert(agent == NULL);  
+   assert(mcc > 0);
+-  assert(mnc > 0);
++  /* HARMONY_PATCH (2026-07-08): allow MNC 00 (e.g. PLMN 001-00) — was assert(mnc > 0) */
++  assert(mnc >= 0);
+   assert(mnc_digit_len > 0);
+   assert(nb_id > 0);
+   assert(ran_type >= 0);
+diff --git a/src/sm/pdcp_sm/ie/pdcp_data_ie.c b/src/sm/pdcp_sm/ie/pdcp_data_ie.c
+index afb7a28..5a47521 100644
+--- a/src/sm/pdcp_sm/ie/pdcp_data_ie.c
++++ b/src/sm/pdcp_sm/ie/pdcp_data_ie.c
+@@ -23,6 +23,7 @@
+ #include "pdcp_data_ie.h"
+ 
+ #include <assert.h>
++#include <stdio.h>  /* HARMONY_PATCH: stderr warning in check_pdcp_bearer */
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -146,11 +147,25 @@ bool check_pdcp_bearer(pdcp_radio_bearer_stats_t* rb)
+ {
+   assert(rb != NULL);
+ 
+-  // Pkts need to be less than bytes since a packet can only have [1,MTU+header)  
+-  assert(rb->txpdu_pkts <= rb->txpdu_bytes); 
+-  assert(rb->rxpdu_pkts <= rb->rxpdu_bytes);
+-  assert(rb->txsdu_pkts <= rb->txsdu_bytes);
+-  assert(rb->rxsdu_pkts <= rb->rxsdu_bytes);
++  /* HARMONY_PATCH (2026-07-08, WPI Tang Lab):
++   * Upstream asserts pkts <= bytes and aborts gNB on transient counter races.
++   * Clamp bytes to packet counts and log once instead of aborting. */
++  static int warned_once = 0;
++  if (rb->txpdu_pkts > rb->txpdu_bytes ||
++      rb->rxpdu_pkts > rb->rxpdu_bytes ||
++      rb->txsdu_pkts > rb->txsdu_bytes ||
++      rb->rxsdu_pkts > rb->rxsdu_bytes) {
++    if (!warned_once) {
++      fprintf(stderr,
++              "[PDCP SM] Inconsistent counters detected (pkts > bytes). "
++              "Clamping bytes to packet counts to avoid process abort.\n");
++      warned_once = 1;
++    }
++    if (rb->txpdu_pkts > rb->txpdu_bytes) rb->txpdu_bytes = rb->txpdu_pkts;
++    if (rb->rxpdu_pkts > rb->rxpdu_bytes) rb->rxpdu_bytes = rb->rxpdu_pkts;
++    if (rb->txsdu_pkts > rb->txsdu_bytes) rb->txsdu_bytes = rb->txsdu_pkts;
++    if (rb->rxsdu_pkts > rb->rxsdu_bytes) rb->rxsdu_bytes = rb->rxsdu_pkts;
++  }
+ 
+   return true;
+ }

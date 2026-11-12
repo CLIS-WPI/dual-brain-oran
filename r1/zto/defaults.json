@@ -1,0 +1,24 @@
+{
+  "_note": "ONE place for spec defaults: the ZTO-Agent system prompt and the Exp-02 reference specs both read this file (zto/resolve.py). Final after exp01-select exp01-20261104 (2026-11-04): sampling_ms 500, horizon_ms 2500 (pre-registered fallback rule), control.debounce_n null = derived ceil(1000 / sampling_ms) = 2 at 500 ms (kept derived so a spec that states another sampling_ms gets its own ~1 s debounce); window_ms 2000 as in the grid. slice_action.target has NO default (the beneficiary must be stated; unspecified → gate HOLD). label_rule.op \"unspecified\" resolves to the default.",
+  "sampling_ms": 500,
+  "window_ms": 2000,
+  "horizon_ms": 2500,
+  "collection_min": 20,
+  "label_rule": {
+    "feature": "cell_prb_util",
+    "op": ">=",
+    "threshold_pct": 80,
+    "min_duration_s": 3
+  },
+  "model": {
+    "latency_budget_ms": 5,
+    "max_size_kb": 2048
+  },
+  "slice_action": {
+    "action": "reserve_prb_for_protected_ue",
+    "reserve_pct": 20
+  },
+  "control": {
+    "debounce_n": null
+  }
+}

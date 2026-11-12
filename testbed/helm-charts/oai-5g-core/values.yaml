@@ -1,0 +1,127 @@
+# Default values for oai-5g-core. The Harmony Operator overrides most of
+# these per-tenant at install/upgrade time (tenant.name, plmn.mcc/mnc, etc.)
+# based on the fields of the corresponding OaiTestbed custom resource — see
+# operator/internal/helmrelease/installer.go.
+
+tenant:
+  name: tenant-a
+  owner: unassigned
+
+# Public Land Mobile Network identity shared by every 5GC network function
+# that needs it (AMF, SMF, UDM, UDR, AUSF). Set per-tenant by the Operator
+# from OaiTestbed.spec.core.plmn (falls back to these defaults otherwise).
+# Live Core AMF uses PLMN 208-95 (see amf config.yaml served_guami_list /
+# plmn_support_list). Keep chart defaults aligned so IMSIs like
+# <IMSI> pass Harmony subscriber/PLMN checks.
+plmn:
+  mcc: "208"
+  mnc: "95"
+
+# OAI UDR expects MySQL at Service DNS name "mysql" (database.host in
+# /openair-udr/etc/config.yaml). Without this, UDR cannot serve auth and
+# Harmony /api/subscribers cannot list/add SIMs in K8s mode.
+mysql:
+  # Prefer standalone oai-mysql chart — Operator helm-reconcile wipes
+  # resources not in the oai-5g-core release. Keep template for optional use.
+  enabled: false
+  image:
+    registry: docker.io
+    repository: library/mysql
+    tag: "8.0"
+    pullPolicy: IfNotPresent
+  database: oai_db
+  user: test
+  password: "<MYSQL_PASSWORD>"
+  rootPassword: "<MYSQL_ROOT_PASSWORD>"
+
+# Official OAI Software Alliance v2.2.1 images, pulled and tagged locally
+# from docker.io/oaisoftwarealliance. Upgraded on 2026-07-08.
+image:
+  registry: localhost/harmony
+  repository: oai
+  tag: v2.2.1
+  pullPolicy: IfNotPresent
+
+nrf:
+  enabled: true
+  replicas: 1
+
+amf:
+  enabled: true
+  replicas: 1
+  # Custom image with NAS/registration stats exporter built and verified locally
+  customImage:
+    enabled: true
+    repository: oai-amf-harmony
+    tag: v2.2.1
+
+smf:
+  enabled: true
+  replicas: 1
+
+udr:
+  enabled: true
+  replicas: 1
+
+udm:
+  enabled: true
+  replicas: 1
+
+ausf:
+  enabled: true
+  replicas: 1
+
+upf:
+  enabled: true
+  replicas: 1
+  # Data plane scales with traffic (GTP-U in user space): own sizing, falls back
+  # to `resources` when unset. Raise for high-throughput / many-UE setups.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  # UPF is the data-plane NF — it needs the SR-IOV NIC for GTP-U traffic.
+  sriov:
+    enabled: true
+    networkAttachmentDefinition: intel-x710-dpdk
+  # Custom image with GTP-U stats exporter built and verified locally
+  customImage:
+    enabled: true
+    repository: oai-upf-harmony
+    tag: v2.2.1
+
+# Informational binding to this tenant's AI Orchestrator agent instance —
+# surfaced as pod annotations on the AMF/SMF so xApps/humans can trace which
+# agent is responsible for this core's tuning recommendations.
+aiAgent:
+  framework: fastapi
+  modelEndpoint: "http://harmony-llm.harmony-ai.svc.cluster.local:11434"
+  model: llama3.3
+
+telemetry:
+  kafka:
+    brokers: "harmony-kafka.kafka-system.svc.cluster.local:9092"
+    # Defaults to tenant-<name>.telemetry.core when left empty.
+    coreTopic: ""
+  fluentbit:
+    image: fluent/fluent-bit:3.1
+    # Sidecars streaming NF logs / GTP-U stats to Kafka. Disable individually
+    # if a given NF's telemetry isn't needed.
+    amf:
+      enabled: true
+    upf:
+      enabled: true
+
+# Control-plane NFs (NRF, AMF, SMF, AUSF, UDM, UDR). Measured on the reference
+# lab (RFsim, 2 UEs): ~0.01–0.02 CPU each — the old 2-CPU limit reserved ~15 CPU
+# of tenant quota for idle services. Override per installation / hardware.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi

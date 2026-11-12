@@ -1,0 +1,10 @@
+{
+  "_intent_id": "I1",
+  "_intent_text": "Predict congestion and reserve 20% of PRBs for edge users.",
+  "$defaults": "zto/defaults.json",
+  "_note": "explicit fields only; every other field = zto/defaults.json (resolve.py). Review: Milad.",
+  "slice_action": {
+    "reserve_pct": 20,
+    "target": "protected_ue"
+  }
+}

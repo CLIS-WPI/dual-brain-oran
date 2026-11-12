@@ -1,0 +1,53 @@
+# Exp-08 vague intents (review: Milad). Run through the full agent (llama3.1:8b, both spec modes) and the gate
+# (both read-back variants). Each is deliberately underspecified or ambiguous; `ambiguity` and `expected_outcome`
+# are for scoring only and are never shown to the models. expected_outcome = what a correct gate should return:
+#   HOLD  the intent does not determine an actuatable spec (any PASS is a silently guessed interpretation)
+#   PASS  the intent determines one spec; expected_spec = explicit fields, everything else zto/defaults.json
+#         (resolved with zto/resolve.py exactly like the Exp-02 references). A PASS with a different spec is wrong.
+# Actuation facts (xapp_congestion_ctrl.c reads protected_ue_ref, never "target" or "threshold_op"): the deployed
+# xApp always protects UE3 and caps every other UE, acting on cell PRB >= threshold. target center_ues and op "<="
+# are expressible but not actuatable → an intent that needs them must FAIL at check 0.
+vague:
+  - id: vague_01
+    text: "Make the network better for users."
+    ambiguity: no objective, no target user, no numbers
+    expected_outcome: HOLD
+  - id: vague_02
+    text: "Protect some users when it gets busy."
+    ambiguity: which users ("some" ≠ the cell-edge UE), how much, what "busy" means
+    expected_outcome: HOLD
+  - id: vague_03
+    text: "Reserve PRBs."
+    ambiguity: for whom, how many, when
+    expected_outcome: HOLD
+  - id: vague_04
+    text: "Keep the edge user happy."
+    ambiguity: no metric, no amount, no trigger — but the beneficiary is the cell-edge UE and the only actuatable
+      action protects it; all numbers are defaults
+    expected_outcome: PASS
+    expected_spec: {slice_action: {action: reserve_prb_for_protected_ue, target: protected_ue}}
+  - id: vague_05
+    text: "Give priority to the important subscriber during peaks."
+    ambiguity: '"important" is undefined (not necessarily the protected cell-edge UE)'
+    expected_outcome: HOLD
+  - id: vague_06
+    text: "Avoid congestion as much as possible."
+    ambiguity: no protected user, no reservation amount; the action protects one UE, it does not avoid congestion
+    expected_outcome: HOLD
+  - id: vague_07
+    text: "Reserve a lot of the downlink for the edge user when load is high."
+    ambiguity: '"a lot" and "high" are unquantified (the default 20 % is not "a lot")'
+    expected_outcome: HOLD
+  - id: vague_08
+    text: "Make sure nobody is starved when the cell fills up."
+    ambiguity: fairness for all UEs is not what the action does (strict priority for one UE, others capped)
+    expected_outcome: HOLD
+  - id: vague_09
+    text: "Act before it is too late."
+    ambiguity: no objective, no horizon, no target
+    expected_outcome: HOLD
+  - id: vague_10
+    text: "Reserve capacity for the users in the middle of the cell when it is congested."
+    ambiguity: names the center UEs as beneficiaries (target center_ues) — not actuatable (the xApp always
+      protects UE3); gate check 0 refuses it
+    expected_outcome: FAIL

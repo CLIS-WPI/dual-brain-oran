@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oai-rfsim.fullname" . }}-gnb
+  labels:
+    {{- include "oai-rfsim.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gnb-rfsim
+spec:
+  {{- /* gnb.replicas lets the portal keep Canvas Run/Stop state across upgrades. */}}
+  replicas: {{ if hasKey .Values.gnb "replicas" }}{{ .Values.gnb.replicas }}{{ else }}1{{ end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: gnb-rfsim
+      harmony.telecom/tenant: {{ .Values.tenant.name }}
+      {{- with $.Values.experiment.slug }}
+      harmony.telecom/experiment: {{ . | quote }}
+      {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: gnb-rfsim
+        harmony.telecom/tenant: {{ .Values.tenant.name }}
+        {{- with $.Values.experiment.slug }}
+        harmony.telecom/experiment: {{ . | quote }}
+        {{- end }}
+        harmony.telecom/ran-scope: {{ $.Values.experiment.slug | default "shared" | quote }}
+    spec:
+      initContainers:
+        - name: render-gnb-config
+          image: busybox:1.36
+          command: ["/bin/sh", "/scripts/render-gnb-conf.sh"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 50m, memory: 32Mi}
+          env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: POD_PREFIX
+              value: {{ .Values.gnb.podIpPrefix | quote }}
+          volumeMounts:
+            - {name: gnb-config-template, mountPath: /config-template}
+            - {name: gnb-etc, mountPath: /etc-oai-gnb}
+            - {name: gnb-render-scripts, mountPath: /scripts}
+      containers:
+        - name: gnb
+          image: "{{ .Values.images.gnb.registry }}/{{ .Values.images.gnb.repository }}:{{ .Values.images.gnb.tag }}"
+          # 2026.w27 treats SA as default; `--sa` is an unknown option and
+          # aborts after RFSIM already came up (see softmodem config_cmdline).
+          command:
+            - /opt/oai-gnb/bin/nr-softmodem
+            - -O
+            - /opt/oai-gnb/etc/gnb.conf
+            - --rfsim
+            - --gNBs.[0].min_rxtxtime
+            - "6"
+          securityContext:
+            capabilities:
+              # SYS_NICE: real-time thread priority/affinity for MAC_STATS
+              # and L1 worker threads. IPC_LOCK: mlockall()/pthread_create()
+              # with SCHED_RR needs a raised RLIMIT_MEMLOCK, which containerd
+              # denies by default without this capability — without it,
+              # nr-softmodem dies with "Error in pthread_create(): errno 12".
+              add: ["NET_ADMIN", "NET_RAW", "SYS_NICE", "IPC_LOCK"]
+          {{- with .Values.gnb.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - {name: rfsim-tcp, containerPort: 4043, protocol: TCP}
+          volumeMounts:
+            - {name: gnb-etc, mountPath: /opt/oai-gnb/etc}
+          resources:
+            {{- toYaml .Values.gnb.resources | nindent 12 }}
+        {{- if .Values.e3Agent.enabled }}
+        - name: e3-agent
+          image: "{{ .Values.e3Agent.image.registry }}/{{ .Values.e3Agent.image.repository }}:{{ .Values.e3Agent.image.tag }}"
+          imagePullPolicy: {{ .Values.e3Agent.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: E3_SOCKET
+              value: /e3/e3.sock
+            - name: E3_PRB_TOTAL
+              value: {{ .Values.e3Agent.prbTotal | quote }}
+            - name: E3_TICK_MS
+              value: {{ .Values.e3Agent.tickMs | quote }}
+          volumeMounts:
+            - {name: e3-ipc, mountPath: /e3}
+          resources:
+            {{- toYaml .Values.e3Agent.resources | nindent 12 }}
+        {{- end }}
+        {{- if .Values.dappRuntime.enabled }}
+        - name: dapp-runtime
+          image: "{{ .Values.dappRuntime.image.registry }}/{{ .Values.dappRuntime.image.repository }}:{{ .Values.dappRuntime.image.tag }}"
+          imagePullPolicy: {{ .Values.dappRuntime.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: E3_SOCKET
+              value: /e3/e3.sock
+          volumeMounts:
+            - {name: e3-ipc, mountPath: /e3}
+          resources:
+            {{- toYaml .Values.dappRuntime.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: gnb-config-template
+          configMap:
+            name: {{ include "oai-rfsim.fullname" . }}-gnb-config
+        - name: gnb-render-scripts
+          configMap:
+            name: {{ include "oai-rfsim.fullname" . }}-gnb-config
+            defaultMode: 0555
+            items:
+              - {key: render-gnb-conf.sh, path: render-gnb-conf.sh}
+        - name: gnb-etc
+          emptyDir: {}
+        {{- if or .Values.e3Agent.enabled .Values.dappRuntime.enabled }}
+        - name: e3-ipc
+          emptyDir: {}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oai-rfsim.gnbServiceName" . }}
+  labels:
+    {{- include "oai-rfsim.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gnb-rfsim
+spec:
+  selector:
+    app.kubernetes.io/component: gnb-rfsim
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+    {{- with $.Values.experiment.slug }}
+    harmony.telecom/experiment: {{ . | quote }}
+    {{- end }}
+    harmony.telecom/ran-scope: {{ $.Values.experiment.slug | default "shared" | quote }}
+  ports:
+    - {name: rfsim-tcp, port: 4043, targetPort: 4043, protocol: TCP}

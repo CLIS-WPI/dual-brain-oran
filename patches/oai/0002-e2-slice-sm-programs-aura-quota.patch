@@ -1,0 +1,329 @@
+diff --git a/openair2/LAYER2/NR_MAC_gNB/aura_quota.h b/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
+--- a/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
++++ b/openair2/LAYER2/NR_MAC_gNB/aura_quota.h
+@@ -34,4 +34,25 @@
+ /** PRB quota for slice id, or -1 if unknown. */
+ int aura_quota_slice_quota(int slice_id);
+ 
++/*
++ * Harmony: E2 (FlexRIC SLICE SM) programming of the same quota tables.
++ * Called from the E2 agent thread; applied by the MAC scheduler on its next
++ * aura_quota_maybe_reload(). While at least one E2 slice exists it takes
++ * precedence over the JSON file; deleting every E2 slice falls back to the file
++ * (and with no file, to the stock scheduler — default behaviour unchanged).
++ *
++ *  pct      share of the DL BWP in percent (1..100), converted to PRBs in the gNB
++ *  ue_ref   RNTI of a connected UE, or its RAN UE ID as reported by E2SM-KPM
++ *           (gNB-CU UE ID = RRC UE ID); re-resolved periodically so a re-attach
++ *           (new RNTI) keeps its slice.
++ */
++void aura_quota_e2_add_slice(int slice_id, int pct);
++void aura_quota_e2_del_slice(int slice_id);
++void aura_quota_e2_assoc(uint32_t ue_ref, int slice_id);
++
++/** Diagnostics: record PRBs actually transmitted (new tx) for an RNTI; a
++ * per-second "[AURA-QUOTA] 1s" summary (asked / granted / tx per mapped UE) is
++ * printed while a quota is active. */
++void aura_quota_note_tx(uint16_t rnti, uint16_t rbSize);
++
+ #endif /* AURA_QUOTA_H */
+diff --git a/openair2/LAYER2/NR_MAC_gNB/aura_quota.c b/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
+--- a/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
++++ b/openair2/LAYER2/NR_MAC_gNB/aura_quota.c
+@@ -17,6 +17,11 @@
+ #include <ctype.h>
+ #include <time.h>
+ #include <sys/stat.h>
++#include <pthread.h>
++
++#include "common/ran_context.h"
++#include "NR_MAC_gNB/nr_mac_gNB.h"
++#include "openair2/F1AP/f1ap_ids.h"
+ 
+ #define AURA_MAX_SLICES 8
+ #define AURA_MAX_UES 16
+@@ -30,6 +35,7 @@
+ typedef struct {
+   uint16_t rnti;
+   int slice_id;
++  uint64_t asked, granted, tx; /* PRB counters for the per-second summary */
+ } aura_ue_t;
+ 
+ static struct {
+@@ -203,8 +209,181 @@
+   return g_aq.loaded ? 0 : -1;
+ }
+ 
++/* ---- Harmony: E2 SLICE SM → AURA --------------------------------------- */
++
++typedef struct {
++  int id;
++  int pct;
++} aura_e2_slice_t;
++
++typedef struct {
++  uint32_t ue_ref;
++  int slice_id;
++} aura_e2_ue_t;
++
++static struct {
++  pthread_mutex_t mtx;
++  int n_slices;
++  int n_ues;
++  aura_e2_slice_t slices[AURA_MAX_SLICES];
++  aura_e2_ue_t ues[AURA_MAX_UES];
++  uint64_t version;
++} g_e2 = {.mtx = PTHREAD_MUTEX_INITIALIZER};
++
++static uint64_t g_e2_applied_version;
++static int g_e2_mode; /* 1 while E2 slices exist: file is ignored */
++
++void aura_quota_e2_add_slice(int slice_id, int pct)
++{
++  if (pct < 1)
++    pct = 1;
++  if (pct > 100)
++    pct = 100;
++  pthread_mutex_lock(&g_e2.mtx);
++  int i = 0;
++  while (i < g_e2.n_slices && g_e2.slices[i].id != slice_id)
++    i++;
++  if (i == g_e2.n_slices && g_e2.n_slices < AURA_MAX_SLICES)
++    g_e2.n_slices++;
++  if (i < g_e2.n_slices) {
++    g_e2.slices[i].id = slice_id;
++    g_e2.slices[i].pct = pct;
++    g_e2.version++;
++  }
++  pthread_mutex_unlock(&g_e2.mtx);
++  fprintf(stderr, "[AURA-QUOTA] E2 slice add/mod id=%d pct=%d\n", slice_id, pct);
++}
++
++void aura_quota_e2_del_slice(int slice_id)
++{
++  pthread_mutex_lock(&g_e2.mtx);
++  for (int i = 0; i < g_e2.n_slices; i++) {
++    if (g_e2.slices[i].id == slice_id) {
++      g_e2.slices[i] = g_e2.slices[--g_e2.n_slices];
++      break;
++    }
++  }
++  for (int i = 0; i < g_e2.n_ues;) {
++    if (g_e2.ues[i].slice_id == slice_id)
++      g_e2.ues[i] = g_e2.ues[--g_e2.n_ues];
++    else
++      i++;
++  }
++  g_e2.version++;
++  pthread_mutex_unlock(&g_e2.mtx);
++  fprintf(stderr, "[AURA-QUOTA] E2 slice del id=%d\n", slice_id);
++}
++
++void aura_quota_e2_assoc(uint32_t ue_ref, int slice_id)
++{
++  pthread_mutex_lock(&g_e2.mtx);
++  int i = 0;
++  while (i < g_e2.n_ues && g_e2.ues[i].ue_ref != ue_ref)
++    i++;
++  if (i == g_e2.n_ues && g_e2.n_ues < AURA_MAX_UES)
++    g_e2.n_ues++;
++  if (i < g_e2.n_ues) {
++    g_e2.ues[i].ue_ref = ue_ref;
++    g_e2.ues[i].slice_id = slice_id;
++    g_e2.version++;
++  }
++  pthread_mutex_unlock(&g_e2.mtx);
++  fprintf(stderr, "[AURA-QUOTA] E2 ue assoc ue_ref=%u -> slice %d\n", ue_ref, slice_id);
++}
++
++/* RNTI of a connected UE given an RNTI or a RAN UE ID (= gNB-CU UE ID). Called
++ * with the MAC scheduler lock held (from the DL scheduler). */
++static int aq_resolve_rnti(uint32_t ue_ref, uint16_t *bwp_size)
++{
++  gNB_MAC_INST *mac = RC.nrmac ? RC.nrmac[0] : NULL;
++  if (!mac)
++    return -1;
++  int found = -1;
++  UE_iterator (mac->UE_info.connected_ue_list, UE) {
++    if (*bwp_size == 0)
++      *bwp_size = UE->current_DL_BWP.BWPSize;
++    if (UE->rnti == ue_ref) {
++      found = UE->rnti;
++      break;
++    }
++    if (du_exists_f1_ue_data(UE->rnti) && du_get_f1_ue_data(UE->rnti).secondary_ue == ue_ref) {
++      found = UE->rnti;
++      break;
++    }
++  }
++  return found;
++}
++
++/* Returns 1 while E2 mode owns the tables (file ignored). */
++static int aq_e2_apply(void)
++{
++  pthread_mutex_lock(&g_e2.mtx);
++  if (g_e2.n_slices == 0) {
++    if (g_e2_mode) {
++      fprintf(stderr, "[AURA-QUOTA] E2 slices removed, quota off (file mode if present)\n");
++      memset(&g_aq, 0, sizeof(g_aq));
++      g_e2_mode = 0;
++    }
++    g_e2_applied_version = g_e2.version;
++    pthread_mutex_unlock(&g_e2.mtx);
++    return 0;
++  }
++  /* Re-resolve on change and every 200 slots (RNTI changes on re-attach). */
++  int changed = g_e2.version != g_e2_applied_version;
++  if (!changed && g_e2_mode && (g_aq.slot_count % 200) != 0) {
++    pthread_mutex_unlock(&g_e2.mtx);
++    return 1;
++  }
++  uint64_t slots = g_aq.slot_count;
++  aura_ue_t prev[AURA_MAX_UES];
++  int n_prev = g_aq.n_ues;
++  memcpy(prev, g_aq.ues, sizeof(prev));
++  memset(&g_aq, 0, sizeof(g_aq));
++  g_aq.slot_count = slots;
++  uint16_t bwp = 0;
++  for (int i = 0; i < g_e2.n_ues && g_aq.n_ues < AURA_MAX_UES; i++) {
++    int rnti = aq_resolve_rnti(g_e2.ues[i].ue_ref, &bwp);
++    if (rnti < 0)
++      continue;
++    g_aq.ues[g_aq.n_ues].rnti = (uint16_t)rnti;
++    g_aq.ues[g_aq.n_ues].slice_id = g_e2.ues[i].slice_id;
++    for (int k = 0; k < n_prev; k++) /* keep diagnostics counters across re-resolve */
++      if (prev[k].rnti == (uint16_t)rnti) {
++        g_aq.ues[g_aq.n_ues].asked = prev[k].asked;
++        g_aq.ues[g_aq.n_ues].granted = prev[k].granted;
++        g_aq.ues[g_aq.n_ues].tx = prev[k].tx;
++      }
++    g_aq.n_ues++;
++  }
++  if (bwp == 0)
++    aq_resolve_rnti(UINT32_MAX, &bwp);
++  g_aq.cap_C = bwp;
++  for (int i = 0; i < g_e2.n_slices; i++) {
++    int q = (g_e2.slices[i].pct * bwp) / 100;
++    g_aq.slices[i].id = g_e2.slices[i].id;
++    g_aq.slices[i].quota = q > 0 ? q : 1;
++  }
++  g_aq.n_slices = g_e2.n_slices;
++  g_aq.loaded = (g_aq.n_slices > 0 && g_aq.n_ues > 0 && bwp > 0);
++  g_e2_mode = 1;
++  g_e2_applied_version = g_e2.version;
++  pthread_mutex_unlock(&g_e2.mtx);
++
++  if (changed) {
++    fprintf(stderr, "[AURA-QUOTA] E2 applied slices=%d ues=%d/%d bwp=%u active=%d\n",
++            g_aq.n_slices, g_aq.n_ues, g_e2.n_ues, (unsigned)bwp, g_aq.loaded);
++    for (int i = 0; i < g_aq.n_slices; i++)
++      fprintf(stderr, "[AURA-QUOTA]  slice id=%d quota=%d PRB\n", g_aq.slices[i].id, g_aq.slices[i].quota);
++    for (int i = 0; i < g_aq.n_ues; i++)
++      fprintf(stderr, "[AURA-QUOTA]  ue rnti=0x%04x -> slice %d\n", g_aq.ues[i].rnti, g_aq.ues[i].slice_id);
++  }
++  return 1;
++}
++
+ void aura_quota_maybe_reload(void)
+ {
++  if (aq_e2_apply())
++    return;
+   const char *path = aq_path();
+   struct stat st;
+   if (stat(path, &st) != 0) {
+@@ -239,6 +418,25 @@
+   for (int i = 0; i < g_aq.n_slices; i++)
+     g_aq.slices[i].remaining = g_aq.slices[i].quota;
+   g_aq.slot_count++;
++  static struct timespec last;
++  struct timespec now;
++  clock_gettime(CLOCK_MONOTONIC, &now);
++  if (g_aq.loaded && now.tv_sec != last.tv_sec) {
++    for (int i = 0; i < g_aq.n_ues; i++) {
++      aura_ue_t *u = &g_aq.ues[i];
++      fprintf(stderr, "[AURA-QUOTA] 1s rnti=0x%04x slice=%d asked=%llu granted=%llu tx=%llu\n", u->rnti, u->slice_id,
++              (unsigned long long)u->asked, (unsigned long long)u->granted, (unsigned long long)u->tx);
++      u->asked = u->granted = u->tx = 0;
++    }
++  }
++  last = now;
++}
++
++void aura_quota_note_tx(uint16_t rnti, uint16_t rbSize)
++{
++  for (int i = 0; i < g_aq.n_ues; i++)
++    if (g_aq.ues[i].rnti == rnti)
++      g_aq.ues[i].tx += rbSize;
+ }
+ 
+ bool aura_quota_active(void)
+@@ -279,6 +477,11 @@
+     capped = (uint16_t)g_aq.slices[si].remaining;
+ 
+   g_aq.slices[si].remaining -= capped;
++  for (int i = 0; i < g_aq.n_ues; i++)
++    if (g_aq.ues[i].rnti == rnti) {
++      g_aq.ues[i].asked += rbSize;
++      g_aq.ues[i].granted += capped;
++    }
+ 
+   if ((g_aq.slot_count % 100) == 0) {
+     fprintf(stderr,
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_dlsch.c
+@@ -1205,6 +1205,7 @@
+     UE->mac_stats.dl.total_bytes += TBS;
+     UE->mac_stats.dl.current_bytes = TBS;
+     UE->mac_stats.dl.total_rbs += sched_pdsch->rbSize;
++    aura_quota_note_tx(UE->rnti, sched_pdsch->rbSize);
+     UE->mac_stats.dl.num_mac_sdu += sdus;
+     UE->mac_stats.dl.current_rbs = sched_pdsch->rbSize;
+     UE->mac_stats.dl.total_sdu_bytes += dlsch_total_bytes;
+diff --git a/openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_slice.c b/openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_slice.c
+--- a/openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_slice.c
++++ b/openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_slice.c
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include "ran_func_slice.h"
++#include "openair2/LAYER2/NR_MAC_gNB/aura_quota.h"
+ #include "../../flexric/test/rnd/fill_rnd_data_slice.h"
+ #include <assert.h>
+ #include <stdio.h>
+@@ -34,12 +35,34 @@
+   slice_ctrl_req_data_t const* slice_req_ctrl = (slice_ctrl_req_data_t const* )data; // &data->slice_req_ctrl;
+   slice_ctrl_msg_t const* msg = &slice_req_ctrl->msg;
+ 
++  /* Harmony: apply SLICE control to the AURA DL PRB quota (NR MAC).
++   * ADD/MOD: STATIC slices only; pos_low..pos_high is the slice's share of the
++   * DL BWP in percent (quota = pos_high - pos_low + 1 %). DEL: remove slices.
++   * ASSOC: ues[].rnti carries an RNTI or the E2SM-KPM RAN UE ID; dl_id = slice.
++   * Without any SLICE control the scheduler is unchanged. */
+   if(msg->type == SLICE_CTRL_SM_V0_ADD){
+     printf("[E2 Agent]: SLICE CONTROL ADD rx\n");
++    ul_dl_slice_conf_t const* dl = &msg->u.add_mod_slice.dl;
++    for (uint32_t i = 0; i < dl->len_slices; i++) {
++      fr_slice_t const* s = &dl->slices[i];
++      if (s->params.type != SLICE_ALG_SM_V0_STATIC) {
++        printf("[E2 Agent]: SLICE id=%u algorithm %d not supported (STATIC only)\n", s->id, s->params.type);
++        continue;
++      }
++      static_slice_t const* sta = &s->params.u.sta;
++      int pct = sta->pos_high >= sta->pos_low ? (int)(sta->pos_high - sta->pos_low + 1) : 0;
++      aura_quota_e2_add_slice((int)s->id, pct);
++    }
+   } else if (msg->type == SLICE_CTRL_SM_V0_DEL){
+     printf("[E2 Agent]: SLICE CONTROL DEL rx\n");
++    del_slice_conf_t const* del = &msg->u.del_slice;
++    for (uint32_t i = 0; i < del->len_dl; i++)
++      aura_quota_e2_del_slice((int)del->dl[i]);
+   } else if (msg->type == SLICE_CTRL_SM_V0_UE_SLICE_ASSOC){
+     printf("[E2 Agent]: SLICE CONTROL ASSOC rx\n");
++    ue_slice_conf_t const* ue = &msg->u.ue_slice;
++    for (uint32_t i = 0; i < ue->len_ue_slice; i++)
++      aura_quota_e2_assoc(ue->ues[i].rnti, (int)ue->ues[i].dl_id);
+   } else {
+     assert(0!=0 && "Unknown msg_type!");
+   }

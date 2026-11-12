@@ -1,0 +1,100 @@
+{{- if .Values.amf.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-amf
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: amf
+spec:
+  replicas: {{ .Values.amf.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: amf
+      harmony.telecom/tenant: {{ .Values.tenant.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: amf
+        harmony.telecom/tenant: {{ .Values.tenant.name }}
+      annotations:
+        # Traceability: which AI Orchestrator agent instance owns tuning
+        # recommendations for this tenant's core.
+        harmony.telecom/ai-agent-endpoint: {{ .Values.aiAgent.modelEndpoint | quote }}
+        harmony.telecom/ai-agent-model: {{ .Values.aiAgent.model | quote }}
+        {{- include "oai-5g-core.rolloutAnnotation" . | nindent 8 }}
+    spec:
+      containers:
+        - name: amf
+          image: {{ include "oai-5g-core.amfImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # custom-amf ENTRYPOINT replaces upstream CMD; pass AMF args explicitly.
+          args:
+            - /openair-amf/bin/oai_amf
+            - -c
+            - /openair-amf/etc/config.yaml
+            - -o
+          env:
+            - name: NRF_HOST
+              value: "{{ include "oai-5g-core.fullname" . }}-nrf"
+            - name: MCC
+              value: {{ .Values.plmn.mcc | quote }}
+            - name: MNC
+              value: {{ .Values.plmn.mnc | quote }}
+          ports:
+            - containerPort: 8080
+              name: sbi
+            - containerPort: 38412
+              name: ngap
+              protocol: SCTP
+          volumeMounts:
+            - name: amf-logs
+              mountPath: /var/log/oai/amf
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+        {{- if and .Values.telemetry.fluentbit.amf.enabled }}
+        # Streams NAS/registration/mobility events to Kafka for the AI
+        # Orchestrator's closed-loop tuning and the Canvas UI's live feed.
+        - name: fluent-bit
+          image: "{{ .Values.telemetry.fluentbit.image }}"
+          volumeMounts:
+            - name: amf-logs
+              mountPath: /var/log/oai/amf
+              readOnly: true
+            - name: fluentbit-amf-config
+              mountPath: /fluent-bit/etc
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+        {{- end }}
+
+      volumes:
+        - name: amf-logs
+          emptyDir: {}
+        {{- if .Values.telemetry.fluentbit.amf.enabled }}
+        - name: fluentbit-amf-config
+          configMap:
+            name: {{ include "oai-5g-core.fullname" . }}-fluentbit-amf-config
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oai-5g-core.fullname" . }}-amf
+  labels:
+    {{- include "oai-5g-core.labels" . | nindent 4 }}
+    app.kubernetes.io/component: amf
+spec:
+  selector:
+    app.kubernetes.io/component: amf
+    harmony.telecom/tenant: {{ .Values.tenant.name }}
+  ports:
+    - name: sbi
+      port: 8080
+      targetPort: sbi
+    - name: ngap
+      port: 38412
+      targetPort: ngap
+      protocol: SCTP
+{{- end }}

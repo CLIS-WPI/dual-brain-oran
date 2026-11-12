@@ -1,0 +1,29 @@
+{#- Congestion xApp config: ONLY keys xapp_congestion_ctrl.c reads. Every {{ slot }} is one field of
+    zto/spec.schema.json that the xApp consumes and that has more than one actuatable value (scripts/list_slots.py
+    counts them). Fixed by zto/actuatable.json (gate check 0), so constants here: metric (label_rule.feature =
+    cell_prb_util), op ">=" (the xApp's only comparison), target protected_ue (via runtime.protected_ue_ref).
+    Spec fields consumed elsewhere (horizon_ms, collection_min: collector/dataset builder; model.*: trainer)
+    are not template slots. `runtime.*` values come from the testbed, never from the LLM. -#}
+{
+  "mode": "control",
+  "policy": "{{ runtime.policy }}",
+  "direction": "dl",
+  "metric": "RRU.PrbTotDl",
+  "kpm_period_ms": {{ sampling_ms }},
+  "window_samples": {{ window_ms | samples(sampling_ms) }},
+  "threshold_cell_prb": {{ label_rule.threshold_pct }},
+  "min_duration_samples": {{ label_rule.min_duration_s | duration_samples(sampling_ms) }},
+  "trigger_consecutive": {{ control.debounce_n | default_debounce(sampling_ms) }},
+  "prob_threshold": 0.5,
+  "reserve_pct": {{ slice_action.reserve_pct }},
+  "protected_ue_ref": {{ runtime.protected_ue_ref }},
+  "best_effort_slice_id": 1,
+  "lease_s": {{ runtime.lease_s | tojson }},
+  "edge_policy": "lowest_prb_share",
+  "nssai_sst": 1,
+  "nssai_sd": "000001",
+  "positive_label": "1",
+  "model_path": "{{ runtime.workdir }}/model.onnx",
+  "preprocess_path": "{{ runtime.workdir }}/preprocess.json",
+  "events_path": "{{ runtime.workdir }}/events.jsonl"
+}

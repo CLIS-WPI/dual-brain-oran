@@ -1,0 +1,18 @@
+apiVersion: v2
+name: oai-ric
+description: >-
+  Per-tenant FlexRIC (Near-RT RIC) — E2 term point for the tenant's gNB pod.
+  Built from the canonical Harmony/flexric source tree (patched EURECOM
+  FlexRIC). Decoupled from operator/ so FlexRIC upgrades don't require an
+  operator rebuild.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - 5g
+  - near-rt-ric
+  - flexric
+  - e2
+  - o-ran
+maintainers:
+  - name: Harmony Tang Lab

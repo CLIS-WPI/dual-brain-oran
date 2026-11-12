@@ -1,0 +1,17 @@
+apiVersion: v2
+name: oai-5g-core
+description: >-
+  Per-tenant OpenAirInterface 5G Core (NRF, AMF, SMF, UPF, UDR, UDM, AUSF),
+  installed into an isolated tenant namespace by the Harmony Operator. Fully
+  decoupled from the operator/ Go codebase and the oai-ran chart so upstream
+  OAI Core releases can be pulled/patched independently.
+type: application
+version: 0.1.0
+appVersion: "2.0.0"
+keywords:
+  - 5g
+  - 5gc
+  - openairinterface
+  - telco
+maintainers:
+  - name: Milad

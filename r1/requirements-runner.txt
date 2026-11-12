@@ -1,0 +1,12 @@
+# Testbed runners (experiments/*, collector, zto/agent+gate+deploy, scripts/*) run in the Harmony portal backend venv
+# (python 3.10.12) with harmony_backend_subset/ + the portal's k8s bridges on sys.path. Packages they import:
+jsonschema==4.26.0
+Jinja2==3.1.6
+PyYAML==6.0.3
+httpx==0.28.1
+numpy==2.2.6
+onnxruntime==1.23.2
+scipy==1.15.3
+openai==1.102.0
+kubernetes==36.0.2
+aiosqlite==0.22.1

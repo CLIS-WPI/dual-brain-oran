@@ -1,0 +1,29 @@
+# KPM / telemetry catalogue: what the R1 collector (r1/collector/kpm_collector.py) actually exposes. Listed
+# verbatim in the ZTO-Agent system prompt (grounding by enumeration). Not a spec field: the model input is
+# fixed (cell_prb_util), so the spec has no metric selection (no consumer; removed 2026-11-03).
+#
+# Source (verified 2026-11-03): FlexRIC E2SM-KPM (SM id 2), report style 4 subscription by the congestion xApp
+# (flexric/examples/xApp/c/dual_brain/xapp_congestion_ctrl.c, cfg.metric default RRU.PrbTotDl), one
+# indication per sampling_ms (wall-clock timerfd in the gNB; 100/250/500 ms verified). Per UE the gNB reports
+# RRU.PrbTotDl as % of the cell's DL PRBs in the period (KPM RAN UE ID = gNB-CU UE ID); the cell value is their
+# sum. Cross-checked against the gNB's own [AURA-PRB] 1 s counts: mean abs diff 1.0 pt.
+
+kpm_metrics:
+  - name: cell_prb_util
+    unit: "% of DL PRBs"
+    kpm: "sum over UEs of RRU.PrbTotDl"
+    model_input: true          # the classifier's features are computed from this series
+  - name: prb_pct_ue1
+    unit: "% of DL PRBs"
+    kpm: RRU.PrbTotDl (UE1)
+  - name: prb_pct_ue2
+    unit: "% of DL PRBs"
+    kpm: RRU.PrbTotDl (UE2)
+  - name: prb_pct_ue3
+    unit: "% of DL PRBs"
+    kpm: RRU.PrbTotDl (UE3, protected)
+
+# Logged by the collector for analysis only (not KPM; not spec inputs): gNB MAC stats dl_mcs/bler/ul_snr per UE,
+# iperf2 receiver thp_dl per UE, UE3 ping RTT, sim/wall speed.
+features:                      # computed by r1/dataset/build.py over the trailing window_ms
+  [mean_prb, std_prb, min_prb, max_prb, slope_prb, last_prb]

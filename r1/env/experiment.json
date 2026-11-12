@@ -1,0 +1,54 @@
+{
+  "_note": "COMMAG-R1 testbed identity for r1/scripts. IMSIs are placeholders: set them to the IMSIs provisioned in your core for UE1/UE2/UE3 (the paper and the DataPort archive use the labels only).",
+  "experiment_id": "<CANVAS_EXPERIMENT_ID>",
+  "slug": "<SLUG>",
+  "namespace": "tenant-test-1-space",
+  "tenant": "test-1",
+  "milcom_experiment_id": null,
+  "gnb_conf": "gnb.rfsim.band77.51prb.conf",
+  "ues": [
+    {
+      "label": "UE1",
+      "key": "ue1",
+      "imsi": "<IMSI_UE1>",
+      "role": "center"
+    },
+    {
+      "label": "UE2",
+      "key": "ue2",
+      "imsi": "<IMSI_UE2>",
+      "role": "center"
+    },
+    {
+      "label": "UE3 (protected)",
+      "key": "ue3",
+      "imsi": "<IMSI_UE3>",
+      "role": "protected"
+    }
+  ],
+  "ue3_rate_mbps": 7.0,
+  "ping_interval_s": 0.1,
+  "calibration_sim_speed": 1.35,
+  "_calibration_sim_speed": "mean sim/wall speed of ramp-20261103-115429 and mech-20261103-123714 (1.32-1.36); start gate \u00b115 % \u2014 LOADED speed; no longer used by the start gate (idle reference instead).",
+  "idle_reference_sim_speed": 1.7,
+  "_idle_reference_sim_speed": {
+    "value": 1.7,
+    "rule": "start gate: idle speed (no traffic) within \u00b115 % of this (collector/speed_rules.py)",
+    "measured": "2026-11-03 15:31:57\u201315:35:58 EST, R1 cell idle (no UE traffic, after isolation), 10 s windows of gNB [AURA-PRB] budget / 61200, one sample per minute, host load 5.2\u20137.5 (r1/results/smoke/unofficial-ts250-20min/guard.jsonl, start_skipped events)",
+    "samples": [
+      1.632,
+      1.684,
+      1.76,
+      1.726,
+      1.736
+    ],
+    "mean": 1.708,
+    "median": 1.726,
+    "chosen": "mean, rounded to 1.70"
+  },
+  "loaded_reference_sim_speed": 1.635,
+  "_loaded_reference_sim_speed": {
+    "note": "2026-11-04 (Milad): run-level regime check, \u00b110 % \u2192 [1.4715, 1.7985]. Pooled mean of the per-cycle loaded speeds (meta.sim_speed_cycle_means) of the 5 exp01 collections: exp01-select exp01-20261104 ts100/ts250/ts500 (1.630/1.618/1.618) + exp01-eval exp01-eval-20261104 seed7/seed8 (1.656/1.653); 65 cycles; all five in regime.",
+    "value_unrounded": 1.635
+  }
+}

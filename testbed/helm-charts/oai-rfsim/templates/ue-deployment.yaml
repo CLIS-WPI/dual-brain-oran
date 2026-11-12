@@ -1,0 +1,101 @@
+{{- range .Values.ue.instances }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oai-rfsim.fullname" $ }}-ue-{{ .name }}
+  labels:
+    {{- include "oai-rfsim.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: virtual-ue
+    harmony.telecom/ue: {{ .name }}
+spec:
+  {{- /* per-instance replicas (0 = provisioned but stopped); default 1. */}}
+  replicas: {{ if hasKey . "replicas" }}{{ .replicas }}{{ else }}1{{ end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: virtual-ue
+      harmony.telecom/ue: {{ .name }}
+      harmony.telecom/tenant: {{ $.Values.tenant.name }}
+      {{- with $.Values.experiment.slug }}
+      harmony.telecom/experiment: {{ . | quote }}
+      {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: virtual-ue
+        harmony.telecom/ue: {{ .name }}
+        harmony.telecom/tenant: {{ $.Values.tenant.name }}
+        {{- with $.Values.experiment.slug }}
+        harmony.telecom/experiment: {{ . | quote }}
+        {{- end }}
+    spec:
+      # UE must schedule after the gNB RFSIM server is reachable, otherwise
+      # the RFSIM TCP client connect fails fast and the UE crash-loops.
+      initContainers:
+        - name: wait-for-gnb-rfsim
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until nc -z -w2 {{ include "oai-rfsim.gnbServiceName" $ }} 4043; do
+                echo "waiting for {{ include "oai-rfsim.gnbServiceName" $ }}:4043...";
+                sleep 2;
+              done
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 50m, memory: 32Mi}
+      containers:
+        - name: ue
+          image: "{{ $.Values.images.ue.registry }}/{{ $.Values.images.ue.repository }}:{{ $.Values.images.ue.tag }}"
+          # 2026.w27: `--sa` is unknown (SA is default) and aborts the softmodem.
+          command:
+            - /opt/oai-nr-ue/bin/nr-uesoftmodem
+            - -O
+            - /opt/oai-nr-ue/etc/uicc.conf
+            - --rfsim
+            - -r
+            - "{{ $.Values.gnb.dlCarrierBandwidth }}"
+            - --numerology
+            - "1"
+            - --band
+            - "{{ $.Values.gnb.band }}"
+            - -C
+            # Force integer string — Helm can coerce large Hz values to 3.60912e+09
+            # which OAI rejects ("option C requires an integer argument").
+            - "{{ printf "%.0f" ($.Values.gnb.ueCenterFrequencyHz | float64) }}"
+            - --ssb
+            - "{{ $.Values.gnb.ueSsbOffset }}"
+            {{- if not .channel }}
+            - --rfsimulator.serveraddr
+            - {{ include "oai-rfsim.gnbServiceName" $ }}
+            {{- else }}
+            # Channel UEs use the indexed `rfsimulator.[0]` section (needed for options). Only
+            # the indexed serveraddr: the un-indexed one is then an *unknown option*, and OAI's
+            # config_check_unknown_cmdlineopt() exits the UE right after attach.
+            - --rfsimulator.[0].serveraddr
+            - {{ include "oai-rfsim.gnbServiceName" $ }}
+            - --rfsimulator.[0].options
+            - chanmod
+            {{- end }}
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN", "SYS_NICE", "IPC_LOCK"]
+          volumeMounts:
+            - name: ue-config
+              mountPath: /opt/oai-nr-ue/etc
+            - name: dev-net-tun
+              mountPath: /dev/net/tun
+          resources:
+            {{- toYaml $.Values.ue.resources | nindent 12 }}
+      volumes:
+        - name: ue-config
+          configMap:
+            name: {{ include "oai-rfsim.fullname" $ }}-ue-{{ .name }}-config
+            items:
+              - {key: uicc.conf, path: uicc.conf}
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+---
+{{- end }}

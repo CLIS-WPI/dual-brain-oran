@@ -1,0 +1,231 @@
+{
+ "_note": "COMMAG-R1 canvas topology as configured in the Harmony portal (experiment \"COMMAG-R1 Dual-Brain isolated\"). IMSIs and internal addresses replaced by placeholders. The edge UE (UE3) channel is the UE-side RFsim DL model: path loss 30 dB, noise power -10 dB (calibration calib-30_-10-20261102-191230: MCS ~27 -> ~14). The iperf3/ping nodes are the portal-era probes; the experiment runners drive traffic themselves (r1/traffic/burst.py, iperf2 reverse UDP from the traffic generator; UE3 7 Mbps + 10 Hz ping).",
+ "nodes": [
+  {
+   "id": "node_core_5g_1775096137055",
+   "type": "core_5g",
+   "label": "5G Core",
+   "config": {}
+  },
+  {
+   "id": "node_gnb_rfsim_1782244684251",
+   "type": "gnb_rfsim",
+   "label": "gNB (RFsim)",
+   "config": {
+    "config_file": "gnb.rfsim.band77.51prb.conf"
+   }
+  },
+  {
+   "id": "node_virtual_ue_1782244710665",
+   "type": "virtual_ue",
+   "label": "Virtual UE 1 (center)",
+   "config": {
+    "imsi": "<IMSI_UE1>",
+    "center_frequency_hz": 3609120000,
+    "ssb": 234,
+    "band": 78
+   }
+  },
+  {
+   "id": "node_virtual_ue_1783726884618",
+   "type": "virtual_ue",
+   "label": "Virtual UE 2 (center)",
+   "config": {
+    "imsi": "<IMSI_UE2>",
+    "count": 1,
+    "default_rfsim_ue": false,
+    "resource_blocks": 51,
+    "numerology": 1,
+    "band": 78,
+    "center_frequency_hz": 3609120000,
+    "ssb": 234,
+    "dnn": "oai",
+    "sst": 1,
+    "sd": 1
+   }
+  },
+  {
+   "id": "node_nonrtric_1784837662307",
+   "type": "nonrtric",
+   "label": "Non-RT RIC",
+   "config": {
+    "namespace": "harmony-core"
+   }
+  },
+  {
+   "id": "node_iperf3_1784841846850",
+   "type": "iperf3",
+   "label": "Iperf",
+   "config": {
+    "target": "<TRAFFIC_SERVER_IP>",
+    "bitrate": "20M",
+    "duration": 200,
+    "protocol": "udp",
+    "direction": "dl"
+   }
+  },
+  {
+   "id": "node_iperf3_1784841883389",
+   "type": "iperf3",
+   "label": "Iperf",
+   "config": {
+    "target": "<TRAFFIC_SERVER_IP>",
+    "bitrate": "20M",
+    "duration": 200,
+    "protocol": "udp",
+    "direction": "dl"
+   }
+  },
+  {
+   "id": "node_flexric_1790268799187",
+   "type": "flexric",
+   "label": "FlexRIC",
+   "config": {
+    "config_path": "/usr/local/etc/flexric/flexric.conf"
+   }
+  },
+  {
+   "id": "node_neuralsmith_1790973194171",
+   "type": "neuralsmith",
+   "label": "NeuralSmith",
+   "config": {
+    "mode": "fast++",
+    "latency_budget_ms": 5
+   }
+  },
+  {
+   "id": "node_zto_agent_1790989576760",
+   "type": "zto_agent",
+   "label": "ZTO-Agent (rApp)",
+   "config": {
+    "intent": "predict congestion and reserve 20% PRBs for edge users",
+    "profile": "auto"
+   }
+  },
+  {
+   "id": "node_congestion_xapp_1790989576761",
+   "type": "congestion_xapp",
+   "label": "Congestion xApp",
+   "config": {
+    "xapp_id": "xapp_congestion_ctrl",
+    "policy": "ml"
+   }
+  },
+  {
+   "id": "node_virtual_ue_1793660331574",
+   "type": "virtual_ue",
+   "label": "Virtual UE 3 (cell-edge)",
+   "config": {
+    "imsi": "<IMSI_UE3>",
+    "count": 1,
+    "default_rfsim_ue": false,
+    "resource_blocks": 51,
+    "numerology": 1,
+    "band": 78,
+    "center_frequency_hz": 3609120000,
+    "ssb": 234,
+    "dnn": "oai",
+    "sst": 1,
+    "sd": 1,
+    "channel_ploss_db": 30.0,
+    "channel_noise_db": -10.0
+   }
+  },
+  {
+   "id": "node_iperf3_1793660331575",
+   "type": "iperf3",
+   "label": "Iperf UE3 (1M UDP)",
+   "config": {
+    "target": "<TRAFFIC_SERVER_IP>",
+    "bitrate": "1M",
+    "duration": 200,
+    "protocol": "udp",
+    "direction": "dl"
+   }
+  },
+  {
+   "id": "node_ping_probe_1793660331576",
+   "type": "ping_probe",
+   "label": "Ping UE3 \u2192 UPF (1 Hz)",
+   "config": {
+    "target": "<UPF_N6_IP>",
+    "count": 1200,
+    "interval": 1,
+    "timeout": 2,
+    "packet_size": 56
+   }
+  },
+  {
+   "id": "node_verification_gate_1793660331577",
+   "type": "verification_gate",
+   "label": "Verification Gate",
+   "config": {}
+  }
+ ],
+ "edges": [
+  {
+   "source": "node_core_5g_1775096137055",
+   "target": "node_gnb_rfsim_1782244684251"
+  },
+  {
+   "source": "node_gnb_rfsim_1782244684251",
+   "target": "node_virtual_ue_1782244710665"
+  },
+  {
+   "source": "node_gnb_rfsim_1782244684251",
+   "target": "node_virtual_ue_1783726884618"
+  },
+  {
+   "source": "node_virtual_ue_1783726884618",
+   "target": "node_iperf3_1784841846850"
+  },
+  {
+   "source": "node_virtual_ue_1782244710665",
+   "target": "node_iperf3_1784841883389"
+  },
+  {
+   "source": "node_gnb_rfsim_1782244684251",
+   "target": "node_flexric_1790268799187"
+  },
+  {
+   "source": "node_nonrtric_1784837662307",
+   "target": "node_flexric_1790268799187"
+  },
+  {
+   "source": "node_nonrtric_1784837662307",
+   "target": "node_zto_agent_1790989576760"
+  },
+  {
+   "source": "node_zto_agent_1790989576760",
+   "target": "node_neuralsmith_1790973194171"
+  },
+  {
+   "source": "node_flexric_1790268799187",
+   "target": "node_congestion_xapp_1790989576761"
+  },
+  {
+   "source": "node_gnb_rfsim_1782244684251",
+   "target": "node_virtual_ue_1793660331574"
+  },
+  {
+   "source": "node_virtual_ue_1793660331574",
+   "target": "node_iperf3_1793660331575"
+  },
+  {
+   "source": "node_virtual_ue_1793660331574",
+   "target": "node_ping_probe_1793660331576"
+  },
+  {
+   "source": "node_neuralsmith_1790973194171",
+   "target": "node_zto_agent_1790989576760"
+  },
+  {
+   "source": "node_zto_agent_1790989576760",
+   "target": "node_verification_gate_1793660331577"
+  },
+  {
+   "source": "node_verification_gate_1793660331577",
+   "target": "node_congestion_xapp_1790989576761"
+  }
+ ]
+}

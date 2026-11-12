@@ -1,0 +1,8 @@
+6 slots in zto/xapp/config.json.j2:
+  control.debounce_n           [1..20]
+  label_rule.min_duration_s    [1..10]
+  label_rule.threshold_pct     [70..90]
+  sampling_ms                  [100..1000]
+  slice_action.reserve_pct     [5..50]
+  window_ms                    [1000..10000]
+runtime (testbed, not spec): runtime.min_hold_samples, runtime.policy, runtime.protected_ue_ref, runtime.release_after_normal_samples, runtime.workdir
